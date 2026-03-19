@@ -1,0 +1,25 @@
+[project]
+name = "veloversi"
+version = "0.1.0"
+description = "Fast Othello/Reversi library powered by Rust"
+readme = "README.md"
+authors = [
+    { name = "Kotetsu0000", email = "61132817+Kotetsu0000@users.noreply.github.com" }
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+veloversi = "veloversi:main"
+
+[tool.maturin]
+module-name = "veloversi._core"
+python-packages = ["veloversi"]
+python-source = "src"
+
+[tool.uv]
+cache-keys = [{ file = "pyproject.toml" }, { file = "src/**/*.rs" }, { file = "Cargo.toml" }, { file = "Cargo.lock" }]
+
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
