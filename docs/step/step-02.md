@@ -32,17 +32,17 @@
 
 ## 受け入れ条件
 
-- [ ] `Color` の黒番・白番表現を確認するテストが成功する
-- [ ] `Board` が `black_bits`, `white_bits`, `side_to_move` を保持することを確認するテストが成功する
-- [ ] `Board::new_initial` が標準初期局面を返すことを確認するテストが成功する
-- [ ] `Board::from_bits` が黒白ビットの重なりを拒否することを確認するテストが成功する
-- [ ] `Board::to_bits` が内部状態を崩さず返すことを確認するテストが成功する
-- [ ] `Board::occupied_bits` が `black_bits | white_bits` と一致することを確認するテストが成功する
-- [ ] `Board::empty_bits` が空きマスのビット集合を返すことを確認するテストが成功する
-- [ ] `Board::validate` が基本整合性のみを検査することを確認するテストが成功する
-- [ ] 初期局面の検証テストが成功する
-- [ ] 異常系の検証テストが成功する
-- [ ] `cargo test` が成功する
+- [x] `Color` の黒番・白番表現を確認するテストが成功する
+- [x] `Board` が `black_bits`, `white_bits`, `side_to_move` を保持することを確認するテストが成功する
+- [x] `Board::new_initial` が標準初期局面を返すことを確認するテストが成功する
+- [x] `Board::from_bits` が黒白ビットの重なりを拒否することを確認するテストが成功する
+- [x] `Board::to_bits` が内部状態を崩さず返すことを確認するテストが成功する
+- [x] `Board::occupied_bits` が `black_bits | white_bits` と一致することを確認するテストが成功する
+- [x] `Board::empty_bits` が空きマスのビット集合を返すことを確認するテストが成功する
+- [x] `Board::validate` が基本整合性のみを検査することを確認するテストが成功する
+- [x] 初期局面の検証テストが成功する
+- [x] 異常系の検証テストが成功する
+- [x] `cargo test` が成功する
 
 ## 実装開始時点の不足
 

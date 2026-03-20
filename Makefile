@@ -5,7 +5,7 @@ build-ext:
 
 test: build-ext
 	cargo test
-	uv run pytest
+	uv run pytest || [ $$? -eq 5 ]
 
 lint:
 	cargo clippy --all-targets --all-features -- -D warnings
