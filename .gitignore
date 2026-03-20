@@ -5,6 +5,10 @@ build/
 dist/
 wheels/
 *.egg-info
+target
 
 # Virtual environments
 .venv
+
+# Local extension build artifacts
+src/veloversi/_core*.so
