@@ -11,6 +11,7 @@
 - Python 側からの動作確認テストを実行できる構成を整える
 - フォーマッタと Linter を実行できる構成を整える
 - ミューテーションテストを導入できる構成を整える
+- Rust のカバレッジを計測できる構成を整える
 - Rust クレートをテストしやすい形にするため、`crate-type` に `rlib` を含める
 - Python 3.12 方針に合わせて ABI 設定を揃える
 - `Makefile` を用意し、開発者が同じ手順で検証できるように実行コマンドを統一する
@@ -23,6 +24,7 @@
 - Rust フォーマット: `cargo fmt`
 - Rust Linter: `cargo clippy`
 - Rust ミューテーションテスト: `cargo-mutants`
+- Rust カバレッジ: `cargo-llvm-cov`
 - Python テスト: `pytest`
 - Python Linter / Formatter: `ruff`
 - Python 型チェック: `basedpyright`
@@ -44,7 +46,8 @@
 - [x] `ruff format --check` が成功する
 - [x] `basedpyright` が成功する
 - [x] `cargo-mutants --file src/lib.rs` が実行できる
-- [x] `Makefile` に少なくとも `test`, `lint`, `format`, `check`, `mutants` が定義されている
+- [x] `cargo llvm-cov` が実行できる
+- [x] `Makefile` に少なくとも `test`, `lint`, `format`, `check`, `mutants`, `coverage`, `coverage-check` が定義されている
 - [x] CI で上記の常設チェックを再現できる
 - [x] `README.md` に初回セットアップ手順と主要な検証コマンドが記載されている
 - [x] `README.md` に `cargo-mutants` の導入手順または使用方法が記載されている
@@ -61,6 +64,7 @@
 - `ruff` や型チェックの設定
 - `basedpyright` の設定
 - ミューテーションテスト実行手順
+- Rust カバレッジ計測手順
 - Rust の `crate-type` における `rlib` 対応
 - Python バージョン方針と ABI 設定の整合
 - `Makefile`
@@ -78,6 +82,8 @@
 - Python 側の開発依存は `uv.lock` で固定する
 - Rust 側の依存は `Cargo.lock` で固定する
 - `cargo-mutants` は README で導入方法を明示し、常設 CI には含めない
+- `cargo-llvm-cov` は README で導入方法と実行方法を明示する
+- カバレッジ閾値の CI 判定は将来的に導入する前提とし、Step 01 ではまず計測可能にする
 - ローカル実行の入口は `Makefile` に統一する
 - Linter と Formatter は CI で必ず落とせるものに限定する
 - ミューテーションテストは常時フル実行ではなく、対象モジュール限定で始める
@@ -111,6 +117,8 @@ Python の型チェックは `basedpyright` を採用する。
   - Rust 実装の静的解析
 - `cargo-mutants`
   - テストの有効性確認
+- `cargo-llvm-cov`
+  - テストの実行範囲を可視化する
 
 ### Python
 
@@ -127,7 +135,7 @@ Python の型チェックは `basedpyright` を採用する。
 ### 運用
 
 - `Makefile`
-  - `test`, `lint`, `format`, `check`, `mutants` などの入口を統一する
+  - `test`, `lint`, `format`, `check`, `mutants`, `coverage`, `coverage-check` などの入口を統一する
 - ミューテーションテスト
   - `mutants` は手動実行専用とし、`push` / `pull_request` の常設 CI には含めない
 - `.github/workflows/ci.yml`
@@ -137,12 +145,13 @@ Python の型チェックは `basedpyright` を採用する。
 
 ## README に記載する内容
 
-- 必要ツール: Rust, Python 3.12, uv, maturin, `cargo-mutants`
+- 必要ツール: Rust, Python 3.12, uv, maturin, `cargo-mutants`, `cargo-llvm-cov`
 - 初回セットアップ手順
 - Python 拡張モジュールのビルド手順
 - `cargo test`, `pytest`, `ruff`, `basedpyright`, `cargo clippy` の実行方法
-- `make test`, `make lint`, `make format`, `make check`, `make mutants` の実行方法
+- `make test`, `make lint`, `make format`, `make check`, `make mutants`, `make coverage`, `make coverage-check` の実行方法
 - `cargo-mutants` の導入手順または実行方法
+- `cargo-llvm-cov` の導入手順または実行方法
 - ミューテーションテストは手動実行であり、常設 CI には含めないこと
 - Step 01 で導入する一時的な疎通確認テストの位置づけ
 
@@ -170,11 +179,19 @@ Python の型チェックは `basedpyright` を採用する。
 - `cargo-mutants --file src/lib.rs` が実行可能であること
 - 実行結果をレビュー可能な形で残せること
 
+### 4. カバレッジ検証
+
+- `cargo-llvm-cov` が実行可能であること
+- Rust 側のテスト実行範囲を確認できること
+- カバレッジ閾値の導入判断に使える状態になっていること
+- `Makefile` からカバレッジ閾値確認を実行できること
+
 ## 導入時の注意
 
 - `cargo-mutants` は実行時間が長くなりやすいため、`push` / `pull_request` の常設 CI では実行せず、手動または限定対象で扱う
 - Python 側の型チェックは、公開 API の境界に対象を絞る
 - Linter のルールは初回から厳格化しすぎず、警告よりも失敗条件を明確にする
+- カバレッジ閾値は、テスト内容の妥当性を確認した後に段階的に導入する
 - 一時的な最小テストは恒久的な仕様テストではないため、後続ステップで実テストに置き換える前提で扱う
 
 ## このステップを先に行う理由

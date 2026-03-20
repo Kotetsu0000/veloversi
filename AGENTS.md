@@ -5,3 +5,4 @@ Veloversiは、Rustで書かれた高速なオセロ/リバーシライブラリ
 ## 参考
 
 - `specs/*.md`: 仕様書一覧。子のリポジトリへの実装は`specs/rust_engine_spec.md`を参照。
+- `ref`: 実装の参照コード。

@@ -9,6 +9,7 @@ Python から利用するための拡張モジュールも提供します。
 - Python 3.12
 - uv
 - cargo-mutants
+- cargo-llvm-cov
 
 ## 初回セットアップ
 
@@ -25,9 +26,11 @@ make lint
 make format
 make check
 make mutants
+make coverage
+make coverage-check
 ```
 
-`make check` は常設 CI 用です。`make mutants` は手動実行用で、`push` / `pull_request` の CI には含めません。
+`make check` は常設 CI 用です。`make mutants`、`make coverage`、`make coverage-check` は手動実行用で、`push` / `pull_request` の CI には含めません。
 
 個別に実行する場合:
 
@@ -40,6 +43,8 @@ uv run ruff check .
 uv run ruff format --check .
 uv run basedpyright
 cargo mutants --file src/lib.rs
+cargo llvm-cov --html
+cargo llvm-cov --fail-under-lines 80
 ```
 
 ## Python 拡張モジュールのビルド
@@ -65,4 +70,24 @@ cargo install cargo-mutants
 
 ```bash
 cargo mutants --file src/lib.rs
+```
+
+## cargo-llvm-cov
+
+`cargo-llvm-cov` は Cargo 管理外の開発ツールです。未導入の場合は次で追加します。
+
+```bash
+cargo install cargo-llvm-cov
+```
+
+実行コマンド:
+
+```bash
+cargo llvm-cov --html
+```
+
+閾値確認:
+
+```bash
+cargo llvm-cov --fail-under-lines 80
 ```
