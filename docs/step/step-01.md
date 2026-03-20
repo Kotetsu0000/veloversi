@@ -32,26 +32,26 @@
 
 ## 受け入れ条件
 
-- [ ] `Cargo.toml` の `crate-type` に `cdylib` と `rlib` が含まれている
-- [ ] Python 3.12 方針と一致する ABI 設定になっている
-- [ ] Python 開発依存が `uv` 管理下に追加され、`uv.lock` に反映されている
-- [ ] Rust 依存が `Cargo.lock` に反映されている
-- [ ] `cargo test` が成功する
-- [ ] `pytest` が成功する
-- [ ] `cargo fmt --check` が成功する
-- [ ] `cargo clippy --all-targets --all-features -- -D warnings` が成功する
-- [ ] `ruff check` が成功する
-- [ ] `ruff format --check` が成功する
-- [ ] `basedpyright` が成功する
-- [ ] `cargo-mutants --file src/lib.rs` が実行できる
-- [ ] `Makefile` に少なくとも `test`, `lint`, `format`, `check`, `mutants` が定義されている
+- [x] `Cargo.toml` の `crate-type` に `cdylib` と `rlib` が含まれている
+- [x] Python 3.12 方針と一致する ABI 設定になっている
+- [x] Python 開発依存が `uv` 管理下に追加され、`uv.lock` に反映されている
+- [x] Rust 依存が `Cargo.lock` に反映されている
+- [x] `cargo test` が成功する
+- [x] `pytest` が成功する
+- [x] `cargo fmt --check` が成功する
+- [x] `cargo clippy --all-targets --all-features -- -D warnings` が成功する
+- [x] `ruff check` が成功する
+- [x] `ruff format --check` が成功する
+- [x] `basedpyright` が成功する
+- [x] `cargo-mutants --file src/lib.rs` が実行できる
+- [x] `Makefile` に少なくとも `test`, `lint`, `format`, `check`, `mutants` が定義されている
 - [ ] CI で上記の常設チェックを再現できる
-- [ ] `README.md` に初回セットアップ手順と主要な検証コマンドが記載されている
-- [ ] `README.md` に `cargo-mutants` の導入手順または使用方法が記載されている
-- [ ] Rust 側に検証基盤の疎通確認を目的とした一時的な最小テストが 1 件以上あり、実行成功する
-- [ ] Python 側に検証基盤の疎通確認を目的とした一時的な最小テストが 1 件以上あり、実行成功する
+- [x] `README.md` に初回セットアップ手順と主要な検証コマンドが記載されている
+- [x] `README.md` に `cargo-mutants` の導入手順または使用方法が記載されている
+- [x] Rust 側に検証基盤の疎通確認を目的とした一時的な最小テストが 1 件以上あり、実行成功する
+- [x] Python 側に検証基盤の疎通確認を目的とした一時的な最小テストが 1 件以上あり、実行成功する
 
-## 現時点の不足
+## 実装開始時点の不足
 
 現状のリポジトリには、最低限の `pyo3` と `maturin` の設定はあるが、以下が未整備である。
 

@@ -6,6 +6,7 @@ dist/
 wheels/
 *.egg-info
 target
+mutants.out
 
 # Virtual environments
 .venv

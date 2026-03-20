@@ -12,10 +12,31 @@ dependencies = []
 [project.scripts]
 veloversi = "veloversi:main"
 
+
+[dependency-groups]
+dev = [
+    "basedpyright>=1.31.4",
+    "maturin>=1.0,<2.0",
+    "pytest>=8.0.0",
+    "ruff>=0.11.0",
+]
+
 [tool.maturin]
 module-name = "veloversi._core"
 python-packages = ["veloversi"]
 python-source = "src"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.basedpyright]
+pythonVersion = "3.12"
+typeCheckingMode = "standard"
+include = ["src", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.uv]
 cache-keys = [{ file = "pyproject.toml" }, { file = "src/**/*.rs" }, { file = "Cargo.toml" }, { file = "Cargo.lock" }]

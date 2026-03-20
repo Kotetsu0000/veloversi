@@ -1,14 +1,26 @@
 use pyo3::prelude::*;
 
-/// A Python module implemented in Rust. The name of this module must match
-/// the `lib.name` setting in the `Cargo.toml`, else Python will not be able to
-/// import the module.
-#[pymodule]
-mod _core {
-    use pyo3::prelude::*;
+fn hello_from_bin_impl() -> &'static str {
+    "Hello from veloversi!"
+}
 
-    #[pyfunction]
-    fn hello_from_bin() -> String {
-        "Hello from veloversi!".to_string()
+#[pyfunction(name = "hello_from_bin")]
+fn hello_from_bin_py() -> &'static str {
+    hello_from_bin_impl()
+}
+
+#[pymodule]
+fn _core(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_function(wrap_pyfunction!(hello_from_bin_py, module)?)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hello_from_bin_impl;
+
+    #[test]
+    fn smoke_returns_expected_message() {
+        assert_eq!(hello_from_bin_impl(), "Hello from veloversi!");
     }
 }
