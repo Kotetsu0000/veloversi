@@ -40,6 +40,14 @@ pub struct LegalMoves {
     pub count: u8,
 }
 
+// 着手適用で起こりうる失敗理由を表す。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MoveError {
+    IllegalMove,
+    PassNotAllowed,
+    TerminalBoard,
+}
+
 impl Board {
     // 標準的な初期局面を返す。
     pub fn new_initial() -> Self {
@@ -95,6 +103,87 @@ fn player_and_opponent_bits(board: &Board) -> (u64, u64) {
         Color::Black => (board.black_bits, board.white_bits),
         Color::White => (board.white_bits, board.black_bits),
     }
+}
+
+// 指定した 1 マスへの着手で裏返る相手石をビット集合で返す。
+fn flips_for_move(board: &Board, mv: Move) -> u64 {
+    if mv.square >= 64 {
+        return 0;
+    }
+
+    let move_bit = 1u64 << mv.square;
+    let (player_bits, opponent_bits) = player_and_opponent_bits(board);
+
+    if (player_bits | opponent_bits) & move_bit != 0 {
+        return 0;
+    }
+
+    let move_file = (mv.square % 8) as i8;
+    let move_rank = (mv.square / 8) as i8;
+    let directions = [
+        (-1_i8, -1_i8),
+        (0, -1),
+        (1, -1),
+        (-1, 0),
+        (1, 0),
+        (-1, 1),
+        (0, 1),
+        (1, 1),
+    ];
+    let mut flips = 0u64;
+
+    for (df, dr) in directions {
+        let mut next_file = move_file + df;
+        let mut next_rank = move_rank + dr;
+        let mut line_flips = 0u64;
+
+        while (0..8).contains(&next_file) && (0..8).contains(&next_rank) {
+            let next_square = (next_rank as u8) * 8 + next_file as u8;
+            let next_bit = 1u64 << next_square;
+
+            if opponent_bits & next_bit != 0 {
+                line_flips |= next_bit;
+                next_file += df;
+                next_rank += dr;
+                continue;
+            }
+
+            if player_bits & next_bit != 0 {
+                flips |= line_flips;
+            }
+            break;
+        }
+    }
+
+    flips
+}
+
+// 合法手である前提で着手を反映した次局面を返す。
+pub fn apply_move_unchecked(board: &Board, mv: Move) -> Board {
+    let flips = flips_for_move(board, mv);
+    let move_bit = 1u64 << mv.square;
+
+    match board.side_to_move {
+        Color::Black => Board {
+            black_bits: board.black_bits | move_bit | flips,
+            white_bits: board.white_bits & !flips,
+            side_to_move: Color::White,
+        },
+        Color::White => Board {
+            black_bits: board.black_bits & !flips,
+            white_bits: board.white_bits | move_bit | flips,
+            side_to_move: Color::Black,
+        },
+    }
+}
+
+// 合法性を確認してから着手を反映した次局面を返す。
+pub fn apply_move(board: &Board, mv: Move) -> Result<Board, MoveError> {
+    if flips_for_move(board, mv) == 0 {
+        return Err(MoveError::IllegalMove);
+    }
+
+    Ok(apply_move_unchecked(board, mv))
 }
 
 // ビットボード演算で現在手番の合法手を列挙する。
@@ -177,7 +266,10 @@ fn _core(_py: Python<'_>, _module: &Bound<'_, PyModule>) -> PyResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Board, BoardError, Color, D4, D5, E4, E5, LegalMoves, Move, generate_legal_moves};
+    use super::{
+        Board, BoardError, Color, D4, D5, E4, E5, LegalMoves, Move, MoveError, apply_move,
+        apply_move_unchecked, flips_for_move, generate_legal_moves,
+    };
 
     // 1 マス分のビットを作る簡易ヘルパー。
     fn bit(square: u8) -> u64 {
@@ -264,6 +356,98 @@ mod tests {
         assert_eq!(legal.bitmask, expected);
         assert_eq!(legal.count, expected.count_ones() as u8);
         assert_eq!(legal, naive);
+    }
+
+    // 素朴実装で反転対象ビットを求め、最適化版との照合に使う。
+    fn flips_for_move_naive(board: &Board, mv: Move) -> u64 {
+        if mv.square >= 64 {
+            return 0;
+        }
+
+        let move_bit = bit(mv.square);
+        let (player_bits, opponent_bits) = match board.side_to_move {
+            Color::Black => (board.black_bits, board.white_bits),
+            Color::White => (board.white_bits, board.black_bits),
+        };
+
+        if (player_bits | opponent_bits) & move_bit != 0 {
+            return 0;
+        }
+
+        let move_file = (mv.square % 8) as i8;
+        let move_rank = (mv.square / 8) as i8;
+        let directions = [
+            (-1_i8, -1_i8),
+            (0, -1),
+            (1, -1),
+            (-1, 0),
+            (1, 0),
+            (-1, 1),
+            (0, 1),
+            (1, 1),
+        ];
+        let mut flips = 0u64;
+
+        for (df, dr) in directions {
+            let mut next_file = move_file + df;
+            let mut next_rank = move_rank + dr;
+            let mut line_flips = 0u64;
+
+            while (0..8).contains(&next_file) && (0..8).contains(&next_rank) {
+                let next_square = square(next_file as u8, next_rank as u8);
+                let next_bit = bit(next_square);
+
+                if opponent_bits & next_bit != 0 {
+                    line_flips |= next_bit;
+                    next_file += df;
+                    next_rank += dr;
+                    continue;
+                }
+
+                if player_bits & next_bit != 0 {
+                    flips |= line_flips;
+                }
+                break;
+            }
+        }
+
+        flips
+    }
+
+    // 素朴実装で合法手を 1 手適用した結果を返す。
+    fn apply_move_naive(board: &Board, mv: Move) -> Result<Board, MoveError> {
+        let flips = flips_for_move_naive(board, mv);
+        if flips == 0 {
+            return Err(MoveError::IllegalMove);
+        }
+
+        let move_bit = bit(mv.square);
+        Ok(match board.side_to_move {
+            Color::Black => Board {
+                black_bits: board.black_bits | move_bit | flips,
+                white_bits: board.white_bits & !flips,
+                side_to_move: Color::White,
+            },
+            Color::White => Board {
+                black_bits: board.black_bits & !flips,
+                white_bits: board.white_bits | move_bit | flips,
+                side_to_move: Color::Black,
+            },
+        })
+    }
+
+    // 盤面上の合法手をビット集合から列挙する。
+    fn legal_move_list(legal: LegalMoves) -> Vec<Move> {
+        let mut bitmask = legal.bitmask;
+        let mut moves = Vec::new();
+
+        while bitmask != 0 {
+            let square = bitmask.trailing_zeros() as u8;
+            moves.push(Move { square });
+            bitmask &= bitmask - 1;
+        }
+
+        moves
     }
 
     #[test]
@@ -365,6 +549,13 @@ mod tests {
     }
 
     #[test]
+    fn move_error_represent_illegal_move() {
+        // MoveError が非合法手を表現できることを確認する。
+        assert_eq!(MoveError::IllegalMove, MoveError::IllegalMove);
+        assert_ne!(MoveError::IllegalMove, MoveError::PassNotAllowed);
+    }
+
+    #[test]
     fn legal_moves_keeps_bitmask_and_count() {
         // LegalMoves がビット集合と件数をそのまま保持できることを確認する。
         let legal = LegalMoves {
@@ -374,6 +565,279 @@ mod tests {
 
         assert_eq!(legal.bitmask, 0b1010);
         assert_eq!(legal.count, 2);
+    }
+
+    #[test]
+    fn flips_for_move_returns_expected_discs_for_single_direction() {
+        // 1 方向だけを反転する着手で反転対象ビットを正しく返すことを確認する。
+        let board = Board {
+            black_bits: bit(square(5, 3)),
+            white_bits: bit(square(4, 3)),
+            side_to_move: Color::Black,
+        };
+        let mv = Move {
+            square: square(3, 3),
+        };
+
+        assert_eq!(flips_for_move(&board, mv), bit(square(4, 3)));
+        assert_eq!(flips_for_move(&board, mv), flips_for_move_naive(&board, mv));
+    }
+
+    #[test]
+    fn flips_for_move_returns_expected_discs_for_multiple_directions() {
+        // 1 手で複数方向を同時に反転する場合も対象ビットを正しく返すことを確認する。
+        let board = Board {
+            black_bits: bit(square(1, 1))
+                | bit(square(3, 1))
+                | bit(square(5, 1))
+                | bit(square(1, 3))
+                | bit(square(5, 3))
+                | bit(square(1, 5))
+                | bit(square(3, 5))
+                | bit(square(5, 5)),
+            white_bits: bit(square(2, 2))
+                | bit(square(3, 2))
+                | bit(square(4, 2))
+                | bit(square(2, 3))
+                | bit(square(4, 3))
+                | bit(square(2, 4))
+                | bit(square(3, 4))
+                | bit(square(4, 4)),
+            side_to_move: Color::Black,
+        };
+        let mv = Move {
+            square: square(3, 3),
+        };
+        let expected = bit(square(2, 2))
+            | bit(square(3, 2))
+            | bit(square(4, 2))
+            | bit(square(2, 3))
+            | bit(square(4, 3))
+            | bit(square(2, 4))
+            | bit(square(3, 4))
+            | bit(square(4, 4));
+
+        assert_eq!(flips_for_move(&board, mv), expected);
+        assert_eq!(flips_for_move(&board, mv), flips_for_move_naive(&board, mv));
+    }
+
+    #[test]
+    fn apply_move_unchecked_applies_initial_legal_move() {
+        // 初期局面の合法手を unchecked 版で適用した結果が正しいことを確認する。
+        let board = Board::new_initial();
+        let next = apply_move_unchecked(
+            &board,
+            Move {
+                square: square(3, 2),
+            },
+        );
+
+        assert_eq!(
+            next.black_bits,
+            bit(square(3, 2)) | bit(square(3, 3)) | bit(square(3, 4)) | bit(square(4, 3))
+        );
+        assert_eq!(next.white_bits, bit(square(4, 4)));
+        assert_eq!(next.side_to_move, Color::White);
+    }
+
+    #[test]
+    fn apply_move_updates_discs_and_side_to_move() {
+        // apply_move が石配置更新、反転処理、手番反転を行うことを確認する。
+        let board = Board::new_initial();
+        let next = apply_move(
+            &board,
+            Move {
+                square: square(3, 2),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            next,
+            Board {
+                black_bits: bit(square(3, 2))
+                    | bit(square(3, 3))
+                    | bit(square(3, 4))
+                    | bit(square(4, 3)),
+                white_bits: bit(square(4, 4)),
+                side_to_move: Color::White,
+            }
+        );
+    }
+
+    #[test]
+    fn apply_move_rejects_illegal_move() {
+        // 既に石があるマスや挟めないマスへの着手を拒否することを確認する。
+        let board = Board::new_initial();
+
+        assert_eq!(
+            apply_move(
+                &board,
+                Move {
+                    square: square(3, 3)
+                }
+            ),
+            Err(MoveError::IllegalMove)
+        );
+        assert_eq!(
+            apply_move(
+                &board,
+                Move {
+                    square: square(0, 0)
+                }
+            ),
+            Err(MoveError::IllegalMove)
+        );
+    }
+
+    #[test]
+    fn apply_move_keeps_board_consistency_and_disc_counts() {
+        // 着手後も黒白ビットが重ならず、石数が期待どおり変化することを確認する。
+        let board = Board::new_initial();
+        let mv = Move {
+            square: square(3, 2),
+        };
+        let flips = flips_for_move(&board, mv);
+        let next = apply_move(&board, mv).unwrap();
+
+        assert_eq!(next.black_bits & next.white_bits, 0);
+        assert_eq!(
+            next.black_bits.count_ones(),
+            board.black_bits.count_ones() + 1 + flips.count_ones()
+        );
+        assert_eq!(
+            next.white_bits.count_ones() + flips.count_ones(),
+            board.white_bits.count_ones()
+        );
+    }
+
+    #[test]
+    fn apply_move_handles_white_turn_position() {
+        // 白番の合法手でも反転処理と手番更新が正しく行われることを確認する。
+        let board = Board {
+            black_bits: bit(square(3, 3)) | bit(square(4, 3)) | bit(square(3, 4)),
+            white_bits: bit(square(4, 4)),
+            side_to_move: Color::White,
+        };
+        let mv = Move {
+            square: square(2, 2),
+        };
+
+        assert_eq!(apply_move(&board, mv), apply_move_naive(&board, mv));
+        assert_eq!(
+            apply_move(&board, mv).unwrap(),
+            Board {
+                black_bits: bit(square(4, 3)) | bit(square(3, 4)),
+                white_bits: bit(square(2, 2)) | bit(square(3, 3)) | bit(square(4, 4)),
+                side_to_move: Color::Black,
+            }
+        );
+    }
+
+    #[test]
+    fn flips_for_move_rejects_occupied_and_out_of_range_squares() {
+        // 既占有マスや盤面外インデックスでは反転対象 0 を返すことを確認する。
+        let board = Board::new_initial();
+
+        assert_eq!(
+            flips_for_move(
+                &board,
+                Move {
+                    square: square(4, 4)
+                }
+            ),
+            0
+        );
+        assert_eq!(flips_for_move(&board, Move { square: 63 }), 0);
+        assert_eq!(flips_for_move(&board, Move { square: 64 }), 0);
+    }
+
+    #[test]
+    fn flips_for_move_rejects_occupied_square_even_if_it_would_flip_when_empty() {
+        // 空きなら合法手になる筋でも、実際に埋まっていれば反転対象 0 を返すことを確認する。
+        let board = Board {
+            black_bits: bit(square(3, 3)) | bit(square(5, 3)),
+            white_bits: bit(square(4, 3)),
+            side_to_move: Color::Black,
+        };
+        let mv = Move {
+            square: square(3, 3),
+        };
+
+        assert_eq!(flips_for_move(&board, mv), 0);
+    }
+
+    #[test]
+    fn apply_move_matches_naive_oracle_for_curated_positions() {
+        // 代表局面群の全合法手で最適化版と素朴実装が一致することを確認する。
+        let positions = [
+            Board::new_initial(),
+            Board {
+                black_bits: bit(square(3, 3)) | bit(square(4, 3)) | bit(square(3, 4)),
+                white_bits: bit(square(4, 4)),
+                side_to_move: Color::White,
+            },
+            Board {
+                black_bits: bit(square(0, 0))
+                    | bit(square(2, 0))
+                    | bit(square(0, 2))
+                    | bit(square(7, 7)),
+                white_bits: bit(square(1, 0)) | bit(square(0, 1)) | bit(square(6, 6)),
+                side_to_move: Color::Black,
+            },
+        ];
+
+        for board in positions {
+            for mv in legal_move_list(generate_legal_moves(&board)) {
+                assert_eq!(flips_for_move(&board, mv), flips_for_move_naive(&board, mv));
+                assert_eq!(apply_move(&board, mv), apply_move_naive(&board, mv));
+                assert_eq!(
+                    apply_move_unchecked(&board, mv),
+                    apply_move_naive(&board, mv).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn apply_move_matches_naive_oracle_for_deterministic_random_positions() {
+        // さまざまな局面の全合法手で最適化版と素朴実装が一致することを確認する。
+        let mut seed = 0x8f4a_c9d1_72be_31a5_u64;
+
+        for _ in 0..128 {
+            seed ^= seed << 7;
+            seed ^= seed >> 9;
+            let occupancy = seed;
+
+            seed ^= seed << 7;
+            seed ^= seed >> 9;
+            let black_bits = seed & occupancy;
+            let white_bits = occupancy & !black_bits;
+
+            seed ^= seed << 7;
+            seed ^= seed >> 9;
+            let side_to_move = if seed & 1 == 0 {
+                Color::Black
+            } else {
+                Color::White
+            };
+
+            let board = Board {
+                black_bits,
+                white_bits,
+                side_to_move,
+            };
+            let legal = generate_legal_moves(&board);
+
+            for mv in legal_move_list(legal) {
+                assert_eq!(flips_for_move(&board, mv), flips_for_move_naive(&board, mv));
+                assert_eq!(apply_move(&board, mv), apply_move_naive(&board, mv));
+                assert_eq!(
+                    apply_move_unchecked(&board, mv),
+                    apply_move_naive(&board, mv).unwrap()
+                );
+            }
+        }
     }
 
     #[test]
