@@ -27,6 +27,8 @@ make check
 make mutants
 ```
 
+`make check` は常設 CI 用です。`make mutants` は手動実行用で、`push` / `pull_request` の CI には含めません。
+
 個別に実行する場合:
 
 ```bash

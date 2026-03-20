@@ -45,7 +45,7 @@
 - [x] `basedpyright` が成功する
 - [x] `cargo-mutants --file src/lib.rs` が実行できる
 - [x] `Makefile` に少なくとも `test`, `lint`, `format`, `check`, `mutants` が定義されている
-- [ ] CI で上記の常設チェックを再現できる
+- [x] CI で上記の常設チェックを再現できる
 - [x] `README.md` に初回セットアップ手順と主要な検証コマンドが記載されている
 - [x] `README.md` に `cargo-mutants` の導入手順または使用方法が記載されている
 - [x] Rust 側に検証基盤の疎通確認を目的とした一時的な最小テストが 1 件以上あり、実行成功する
@@ -77,7 +77,7 @@
 - Python の最低対応バージョンは 3.12 とし、ABI 設定もそれに揃える
 - Python 側の開発依存は `uv.lock` で固定する
 - Rust 側の依存は `Cargo.lock` で固定する
-- `cargo-mutants` は README または CI で導入方法を明示する
+- `cargo-mutants` は README で導入方法を明示し、常設 CI には含めない
 - ローカル実行の入口は `Makefile` に統一する
 - Linter と Formatter は CI で必ず落とせるものに限定する
 - ミューテーションテストは常時フル実行ではなく、対象モジュール限定で始める
@@ -128,6 +128,8 @@ Python の型チェックは `basedpyright` を採用する。
 
 - `Makefile`
   - `test`, `lint`, `format`, `check`, `mutants` などの入口を統一する
+- ミューテーションテスト
+  - `mutants` は手動実行専用とし、`push` / `pull_request` の常設 CI には含めない
 - `.github/workflows/ci.yml`
   - PR ごとに最低限の検証を自動実行する
 - `README.md`
@@ -141,6 +143,7 @@ Python の型チェックは `basedpyright` を採用する。
 - `cargo test`, `pytest`, `ruff`, `basedpyright`, `cargo clippy` の実行方法
 - `make test`, `make lint`, `make format`, `make check`, `make mutants` の実行方法
 - `cargo-mutants` の導入手順または実行方法
+- ミューテーションテストは手動実行であり、常設 CI には含めないこと
 - Step 01 で導入する一時的な疎通確認テストの位置づけ
 
 ## 検証項目
@@ -169,7 +172,7 @@ Python の型チェックは `basedpyright` を採用する。
 
 ## 導入時の注意
 
-- `cargo-mutants` は実行時間が長くなりやすいため、CI 常時実行ではなく手動または限定対象で始める
+- `cargo-mutants` は実行時間が長くなりやすいため、`push` / `pull_request` の常設 CI では実行せず、手動または限定対象で扱う
 - Python 側の型チェックは、公開 API の境界に対象を絞る
 - Linter のルールは初回から厳格化しすぎず、警告よりも失敗条件を明確にする
 - 一時的な最小テストは恒久的な仕様テストではないため、後続ステップで実テストに置き換える前提で扱う
