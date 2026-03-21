@@ -2,6 +2,14 @@ mod flip_tables;
 
 use flip_tables::{BB_DLINE02, BB_DLINE57, BB_FLIPPED, BB_H2VLINE, BB_MUL16, BB_SEED, BB_VLINE};
 use pyo3::prelude::*;
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::{
+    __m128i, __m256i, _mm_cvtsi64_si128, _mm_cvtsi128_si64, _mm_or_si128, _mm_set_epi64x,
+    _mm_set1_epi64x, _mm_shuffle_epi32, _mm_unpackhi_epi64, _mm_xor_si128, _mm256_add_epi64,
+    _mm256_and_si256, _mm256_broadcastq_epi64, _mm256_castsi256_si128, _mm256_extracti128_si256,
+    _mm256_or_si256, _mm256_set_epi64x, _mm256_sllv_epi64, _mm256_srlv_epi64,
+};
+use std::sync::OnceLock;
 
 // 初期局面で使う 4 マスのインデックス。
 const D4: u8 = 27;
@@ -70,6 +78,76 @@ pub enum PerftError {
 enum PerftMode {
     Mode1,
     Mode2,
+}
+
+// 実行時に選択する SIMD 経路の優先設定を表す。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SimdPreference {
+    Auto,
+    Generic,
+    Sse2,
+    Avx2,
+}
+
+static SIMD_PREFERENCE: OnceLock<SimdPreference> = OnceLock::new();
+
+// 環境変数から SIMD 経路の強制指定を読み取る。
+fn simd_preference() -> SimdPreference {
+    *SIMD_PREFERENCE.get_or_init(|| match std::env::var("VELOVERSI_SIMD") {
+        Ok(value) => match value.to_ascii_lowercase().as_str() {
+            "generic" => SimdPreference::Generic,
+            "sse2" => SimdPreference::Sse2,
+            "avx2" => SimdPreference::Avx2,
+            _ => SimdPreference::Auto,
+        },
+        Err(_) => SimdPreference::Auto,
+    })
+}
+
+// 合法手生成で使う実装経路名を返す。
+fn selected_movegen_backend() -> &'static str {
+    #[cfg(target_arch = "x86_64")]
+    {
+        match simd_preference() {
+            SimdPreference::Generic => "generic",
+            SimdPreference::Sse2 => "generic",
+            SimdPreference::Avx2 => {
+                assert!(
+                    std::arch::is_x86_feature_detected!("avx2"),
+                    "VELOVERSI_SIMD=avx2 が指定されましたが、この CPU は avx2 非対応です"
+                );
+                "avx2"
+            }
+            SimdPreference::Auto => {
+                if std::arch::is_x86_feature_detected!("avx2") {
+                    "avx2"
+                } else {
+                    "generic"
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        "generic"
+    }
+}
+
+// 盤面更新で使う実装経路名を返す。
+fn selected_board_backend() -> &'static str {
+    #[cfg(target_arch = "x86_64")]
+    {
+        match simd_preference() {
+            SimdPreference::Generic => "generic",
+            SimdPreference::Sse2 | SimdPreference::Avx2 | SimdPreference::Auto => "sse2",
+        }
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        "generic"
+    }
 }
 
 impl TryFrom<u8> for PerftMode {
@@ -159,6 +237,7 @@ const NOT_H_FILE: u64 = 0x7f7f7f7f7f7f7f7f;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Flip {
     pos: u8,
+    move_bit: u64,
     flip: u64,
 }
 
@@ -167,6 +246,30 @@ struct Flip {
 struct OrientedBoard {
     player: u64,
     opponent: u64,
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn move_board_sse2(player: u64, opponent: u64, flip: Flip) -> (u64, u64) {
+    let board = _mm_set_epi64x(opponent as i64, player as i64);
+    let flips = _mm_set1_epi64x(flip.flip as i64);
+    let swapped = _mm_shuffle_epi32(_mm_xor_si128(board, flips), 0x4e);
+    let result = _mm_xor_si128(swapped, _mm_set_epi64x(flip.move_bit as i64, 0));
+    let next_player = _mm_cvtsi128_si64(result) as u64;
+    let next_opponent = _mm_cvtsi128_si64(_mm_unpackhi_epi64(result, result)) as u64;
+    (next_player, next_opponent)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn undo_board_sse2(player: u64, opponent: u64, flip: Flip) -> (u64, u64) {
+    let board = _mm_set_epi64x(opponent as i64, player as i64);
+    let flips = _mm_set1_epi64x(flip.flip as i64);
+    let swapped = _mm_shuffle_epi32(_mm_xor_si128(board, flips), 0x4e);
+    let result = _mm_xor_si128(swapped, _mm_set_epi64x(0, flip.move_bit as i64));
+    let prev_player = _mm_cvtsi128_si64(result) as u64;
+    let prev_opponent = _mm_cvtsi128_si64(_mm_unpackhi_epi64(result, result)) as u64;
+    (prev_player, prev_opponent)
 }
 
 impl OrientedBoard {
@@ -205,6 +308,7 @@ impl OrientedBoard {
     fn calc_flip(self, square: u8) -> Flip {
         Flip {
             pos: square,
+            move_bit: if square < 64 { 1u64 << square } else { 0 },
             flip: flips_for_move_bits(self.player, self.opponent, square),
         }
     }
@@ -214,6 +318,7 @@ impl OrientedBoard {
     fn calc_flip_unchecked(self, square: u8) -> Flip {
         Flip {
             pos: square,
+            move_bit: 1u64 << square,
             flip: flips_for_move_bits_unchecked(self.player, self.opponent, square),
         }
     }
@@ -221,27 +326,59 @@ impl OrientedBoard {
     // 着手をその場で反映し、次手番視点へ更新する。
     #[inline(always)]
     fn move_board(&mut self, flip: Flip) {
-        self.player ^= flip.flip;
-        self.opponent ^= flip.flip;
-        self.player ^= 1u64 << flip.pos;
-        std::mem::swap(&mut self.player, &mut self.opponent);
+        #[cfg(target_arch = "x86_64")]
+        {
+            if selected_board_backend() == "sse2" {
+                let (next_player, next_opponent) =
+                    unsafe { move_board_sse2(self.player, self.opponent, flip) };
+                self.player = next_player;
+                self.opponent = next_opponent;
+                return;
+            }
+        }
+
+        let next_player = self.opponent ^ flip.flip;
+        let next_opponent = self.player ^ flip.flip ^ flip.move_bit;
+        self.player = next_player;
+        self.opponent = next_opponent;
     }
 
     // 着手を戻して元の手番視点へ戻す。
     #[inline(always)]
     fn undo_board(&mut self, flip: Flip) {
-        std::mem::swap(&mut self.player, &mut self.opponent);
-        self.player ^= 1u64 << flip.pos;
-        self.player ^= flip.flip;
-        self.opponent ^= flip.flip;
+        #[cfg(target_arch = "x86_64")]
+        {
+            if selected_board_backend() == "sse2" {
+                let (prev_player, prev_opponent) =
+                    unsafe { undo_board_sse2(self.player, self.opponent, flip) };
+                self.player = prev_player;
+                self.opponent = prev_opponent;
+                return;
+            }
+        }
+
+        let prev_player = self.opponent ^ flip.flip ^ flip.move_bit;
+        let prev_opponent = self.player ^ flip.flip;
+        self.player = prev_player;
+        self.opponent = prev_opponent;
     }
 
     // 着手済みの次局面をコピーとして返す。
     #[inline(always)]
     fn move_copy(self, flip: Flip) -> Self {
-        let mut next = self;
-        next.move_board(flip);
-        next
+        #[cfg(target_arch = "x86_64")]
+        {
+            if selected_board_backend() == "sse2" {
+                let (player, opponent) =
+                    unsafe { move_board_sse2(self.player, self.opponent, flip) };
+                return Self { player, opponent };
+            }
+        }
+
+        Self {
+            player: self.opponent ^ flip.flip,
+            opponent: self.player ^ flip.flip ^ flip.move_bit,
+        }
     }
 
     // パスとして手番だけを入れ替える。
@@ -259,7 +396,7 @@ fn flips_for_move(board: &Board, mv: Move) -> u64 {
 
 // oriented ビットボードから合法手集合のビットマスクだけを返す。
 #[inline(always)]
-fn legal_moves_bitmask(player_bits: u64, opponent_bits: u64) -> u64 {
+fn legal_moves_bitmask_generic(player_bits: u64, opponent_bits: u64) -> u64 {
     let horizontal_opponent = opponent_bits & 0x7e7e7e7e7e7e7e7e_u64;
 
     let mut flip1 = horizontal_opponent & (player_bits << 1);
@@ -322,6 +459,83 @@ fn legal_moves_bitmask(player_bits: u64, opponent_bits: u64) -> u64 {
     moves |= flip9 >> 9;
     moves |= flip8 >> 8;
     moves & !(player_bits | opponent_bits)
+}
+
+// 実行環境に応じて合法手生成を generic / AVX2 で切り替える。
+#[inline(always)]
+fn legal_moves_bitmask(player_bits: u64, opponent_bits: u64) -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if selected_movegen_backend() == "avx2" {
+            // AVX2 が使える環境では 4 方向を SIMD でまとめて処理する。
+            return unsafe { legal_moves_bitmask_avx2(player_bits, opponent_bits) };
+        }
+    }
+
+    legal_moves_bitmask_generic(player_bits, opponent_bits)
+}
+
+// AVX2 実装の合法手生成。
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn legal_moves_bitmask_avx2(player_bits: u64, opponent_bits: u64) -> u64 {
+    let shifts: __m256i = _mm256_set_epi64x(7, 9, 8, 1);
+    let shift_twice: __m256i = _mm256_add_epi64(shifts, shifts);
+    let horizontal_mask: __m256i = _mm256_set_epi64x(
+        0x7e7e7e7e7e7e7e7e_u64 as i64,
+        0x7e7e7e7e7e7e7e7e_u64 as i64,
+        -1,
+        0x7e7e7e7e7e7e7e7e_u64 as i64,
+    );
+    let player_vec = _mm256_broadcastq_epi64(_mm_cvtsi64_si128(player_bits as i64));
+    let opponent_vec = _mm256_and_si256(
+        _mm256_broadcastq_epi64(_mm_cvtsi64_si128(opponent_bits as i64)),
+        horizontal_mask,
+    );
+
+    let mut flip_l = _mm256_and_si256(opponent_vec, _mm256_sllv_epi64(player_vec, shifts));
+    let mut flip_r = _mm256_and_si256(opponent_vec, _mm256_srlv_epi64(player_vec, shifts));
+
+    flip_l = _mm256_or_si256(
+        flip_l,
+        _mm256_and_si256(opponent_vec, _mm256_sllv_epi64(flip_l, shifts)),
+    );
+    flip_r = _mm256_or_si256(
+        flip_r,
+        _mm256_and_si256(opponent_vec, _mm256_srlv_epi64(flip_r, shifts)),
+    );
+
+    let pre_l = _mm256_and_si256(opponent_vec, _mm256_sllv_epi64(opponent_vec, shifts));
+    let pre_r = _mm256_srlv_epi64(pre_l, shifts);
+
+    flip_l = _mm256_or_si256(
+        flip_l,
+        _mm256_and_si256(pre_l, _mm256_sllv_epi64(flip_l, shift_twice)),
+    );
+    flip_r = _mm256_or_si256(
+        flip_r,
+        _mm256_and_si256(pre_r, _mm256_srlv_epi64(flip_r, shift_twice)),
+    );
+    flip_l = _mm256_or_si256(
+        flip_l,
+        _mm256_and_si256(pre_l, _mm256_sllv_epi64(flip_l, shift_twice)),
+    );
+    flip_r = _mm256_or_si256(
+        flip_r,
+        _mm256_and_si256(pre_r, _mm256_srlv_epi64(flip_r, shift_twice)),
+    );
+
+    let moves_vec = _mm256_or_si256(
+        _mm256_sllv_epi64(flip_l, shifts),
+        _mm256_srlv_epi64(flip_r, shifts),
+    );
+    let mut moves128: __m128i = _mm_or_si128(
+        _mm256_castsi256_si128(moves_vec),
+        _mm256_extracti128_si256(moves_vec, 1),
+    );
+    moves128 = _mm_or_si128(moves128, _mm_unpackhi_epi64(moves128, moves128));
+
+    (_mm_cvtsi128_si64(moves128) as u64) & !(player_bits | opponent_bits)
 }
 
 // `bb_seed` を横方向専用の 4 バイト単位アクセスとして読み出す。
@@ -1058,6 +1272,13 @@ mod tests {
 
         println!("total={}", total);
         assert_eq!(total, expected);
+    }
+
+    // 現在選択されている SIMD 経路を表示する。
+    fn print_simd_status() {
+        println!("VELOVERSI_SIMD={:?}", crate::simd_preference());
+        println!("movegen backend={}", crate::selected_movegen_backend());
+        println!("board backend={}", crate::selected_board_backend());
     }
 
     #[test]
@@ -1918,6 +2139,7 @@ mod tests {
     #[ignore = "long-running perft verification"]
     fn perft_long_initial_position_mode_one_to_depth_fifteen() {
         // 初期局面の mode 1 既知値を深さ 9 から 15 まで確認する。
+        print_simd_status();
         let expected = [
             (9_u8, 3005288_u64),
             (10, 24571284),
@@ -1937,6 +2159,7 @@ mod tests {
     #[ignore = "long-running perft verification"]
     fn perft_long_initial_position_mode_two_to_depth_fifteen() {
         // 初期局面の mode 2 既知値を深さ 9 から 15 まで確認する。
+        print_simd_status();
         let expected = [
             (9_u8, 3005320_u64),
             (10, 24571420),
@@ -1950,6 +2173,15 @@ mod tests {
         for (depth, expected_nodes) in expected {
             assert_perft_long_with_progress(depth, 2, expected_nodes);
         }
+    }
+
+    #[test]
+    #[ignore = "simd benchmark helper"]
+    fn perft_bench_initial_position_mode_one_to_depth_thirteen() {
+        // SIMD 実装比較用に、mode 1 の深さ 12 と 13 を進捗付きで確認する。
+        print_simd_status();
+        assert_perft_long_with_progress(12, 1, 1_939_886_636);
+        assert_perft_long_with_progress(13, 1, 18_429_641_748);
     }
 
     #[test]
