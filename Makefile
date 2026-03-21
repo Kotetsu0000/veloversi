@@ -28,5 +28,5 @@ coverage-check:
 	cargo llvm-cov --fail-under-lines 85
 
 perft-long:
-	cargo test perft_long_initial_position_mode_one_to_depth_fifteen -- --ignored --nocapture
-	cargo test perft_long_initial_position_mode_two_to_depth_fifteen -- --ignored --nocapture
+	cargo test --release perft_long_initial_position_mode_one_to_depth_fifteen -- --ignored --nocapture
+	cargo test --release perft_long_initial_position_mode_two_to_depth_fifteen -- --ignored --nocapture

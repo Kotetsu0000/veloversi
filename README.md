@@ -46,11 +46,13 @@ uv run basedpyright
 cargo mutants --file src/lib.rs
 cargo llvm-cov --html
 cargo llvm-cov --fail-under-lines 80
-cargo test perft_long_initial_position_mode_one_to_depth_fifteen -- --ignored --nocapture
-cargo test perft_long_initial_position_mode_two_to_depth_fifteen -- --ignored --nocapture
+cargo test --release perft_long_initial_position_mode_one_to_depth_fifteen -- --ignored --nocapture
+cargo test --release perft_long_initial_position_mode_two_to_depth_fifteen -- --ignored --nocapture
 ```
 
-`make perft-long` は初期局面の Perft 既知値を深さ 9 から 15 まで確認する長時間検証用コマンドです。ルートの合法手単位で進捗を表示します。
+`make perft-long` は初期局面の Perft 既知値を深さ 9 から 15 まで確認する長時間検証用コマンドです。`--release` で実行し、ルートの合法手単位で進捗を表示します。
+
+現在の Perft 実装では、`ref` 配下の参考実装を参照しつつ、合法手生成と反転計算を oriented ビットボード寄りのホットパスへ寄せています。あわせて、`board_status` を経由しない Perft 専用経路、深さ 1 / 2 の末端特殊化、長時間検証時のルート手単位並列化を入れています。
 
 ## Python 拡張モジュールのビルド
 

@@ -147,6 +147,9 @@ fn board_with_side_to_move(board: &Board, side_to_move: Color) -> Board {
     }
 }
 
+const NOT_A_FILE: u64 = 0xfefefefefefefefe;
+const NOT_H_FILE: u64 = 0x7f7f7f7f7f7f7f7f;
+
 // 指定した 1 マスへの着手で裏返る相手石をビット集合で返す。
 fn flips_for_move(board: &Board, mv: Move) -> u64 {
     if mv.square >= 64 {
@@ -160,152 +163,35 @@ fn flips_for_move(board: &Board, mv: Move) -> u64 {
         return 0;
     }
 
-    let move_file = (mv.square % 8) as i8;
-    let move_rank = (mv.square / 8) as i8;
-    let directions = [
-        (-1_i8, -1_i8),
-        (0, -1),
-        (1, -1),
-        (-1, 0),
-        (1, 0),
-        (-1, 1),
-        (0, 1),
-        (1, 1),
-    ];
     let mut flips = 0u64;
-
-    for (df, dr) in directions {
-        let mut next_file = move_file + df;
-        let mut next_rank = move_rank + dr;
-        let mut line_flips = 0u64;
-
-        while (0..8).contains(&next_file) && (0..8).contains(&next_rank) {
-            let next_square = (next_rank as u8) * 8 + next_file as u8;
-            let next_bit = 1u64 << next_square;
-
-            if opponent_bits & next_bit != 0 {
-                line_flips |= next_bit;
-                next_file += df;
-                next_rank += dr;
-                continue;
+    macro_rules! collect_flips {
+        ($shift:expr, $mask:expr) => {{
+            let mut line = $shift(move_bit) & $mask & opponent_bits;
+            line |= $shift(line) & $mask & opponent_bits;
+            line |= $shift(line) & $mask & opponent_bits;
+            line |= $shift(line) & $mask & opponent_bits;
+            line |= $shift(line) & $mask & opponent_bits;
+            line |= $shift(line) & $mask & opponent_bits;
+            if $shift(line) & $mask & player_bits != 0u64 {
+                flips |= line;
             }
-
-            if player_bits & next_bit != 0 {
-                flips |= line_flips;
-            }
-            break;
-        }
+        }};
     }
+
+    collect_flips!(|bits| bits << 1, NOT_A_FILE);
+    collect_flips!(|bits| bits >> 1, NOT_H_FILE);
+    collect_flips!(|bits| bits << 8, u64::MAX);
+    collect_flips!(|bits| bits >> 8, u64::MAX);
+    collect_flips!(|bits| bits << 9, NOT_A_FILE);
+    collect_flips!(|bits| bits << 7, NOT_H_FILE);
+    collect_flips!(|bits| bits >> 7, NOT_A_FILE);
+    collect_flips!(|bits| bits >> 9, NOT_H_FILE);
 
     flips
 }
 
-// 合法手である前提で着手を反映した次局面を返す。
-pub fn apply_move_unchecked(board: &Board, mv: Move) -> Board {
-    let flips = flips_for_move(board, mv);
-    let move_bit = 1u64 << mv.square;
-
-    match board.side_to_move {
-        Color::Black => Board {
-            black_bits: board.black_bits | move_bit | flips,
-            white_bits: board.white_bits & !flips,
-            side_to_move: Color::White,
-        },
-        Color::White => Board {
-            black_bits: board.black_bits & !flips,
-            white_bits: board.white_bits | move_bit | flips,
-            side_to_move: Color::Black,
-        },
-    }
-}
-
-// 合法性を確認してから着手を反映した次局面を返す。
-pub fn apply_move(board: &Board, mv: Move) -> Result<Board, MoveError> {
-    if flips_for_move(board, mv) == 0 {
-        return Err(MoveError::IllegalMove);
-    }
-
-    Ok(apply_move_unchecked(board, mv))
-}
-
-// 強制パス局面でのみ手番を反転した盤面を返す。
-pub fn apply_forced_pass(board: &Board) -> Result<Board, MoveError> {
-    match board_status(board) {
-        BoardStatus::Ongoing => Err(MoveError::PassNotAllowed),
-        BoardStatus::ForcedPass => Ok(board_with_side_to_move(
-            board,
-            match board.side_to_move {
-                Color::Black => Color::White,
-                Color::White => Color::Black,
-            },
-        )),
-        BoardStatus::Terminal => Err(MoveError::TerminalBoard),
-    }
-}
-
-// 現局面が継続中、強制パス、終局のどれかを返す。
-pub fn board_status(board: &Board) -> BoardStatus {
-    if generate_legal_moves(board).count > 0 {
-        return BoardStatus::Ongoing;
-    }
-
-    let opponent_board = board_with_side_to_move(
-        board,
-        match board.side_to_move {
-            Color::Black => Color::White,
-            Color::White => Color::Black,
-        },
-    );
-
-    if generate_legal_moves(&opponent_board).count > 0 {
-        BoardStatus::ForcedPass
-    } else {
-        BoardStatus::Terminal
-    }
-}
-
-// Perft の再帰本体をモード差だけ切り替えながら実行する。
-fn perft_with_mode(board: &Board, depth: u8, mode: PerftMode) -> u64 {
-    if depth == 0 {
-        return 1;
-    }
-
-    let legal = generate_legal_moves(board);
-    if legal.count > 0 {
-        let mut bitmask = legal.bitmask;
-        let mut nodes = 0u64;
-
-        while bitmask != 0 {
-            let square = bitmask.trailing_zeros() as u8;
-            let next_board = apply_move_unchecked(board, Move { square });
-            nodes += perft_with_mode(&next_board, depth - 1, mode);
-            bitmask &= bitmask - 1;
-        }
-
-        return nodes;
-    }
-
-    match board_status(board) {
-        BoardStatus::ForcedPass => {
-            let next_board = apply_forced_pass(board).expect("forced pass must be applicable");
-            match mode {
-                PerftMode::Mode1 => perft_with_mode(&next_board, depth - 1, mode),
-                PerftMode::Mode2 => perft_with_mode(&next_board, depth, mode),
-            }
-        }
-        BoardStatus::Terminal => 1,
-        BoardStatus::Ongoing => unreachable!("legal moves exist for ongoing board"),
-    }
-}
-
-// モード差を切り替えながら Perft の葉数を返す。
-pub fn perft(board: &Board, depth: u8, mode: u8) -> Result<u64, PerftError> {
-    Ok(perft_with_mode(board, depth, PerftMode::try_from(mode)?))
-}
-
-// ビットボード演算で現在手番の合法手を列挙する。
-pub fn generate_legal_moves(board: &Board) -> LegalMoves {
-    let (player_bits, opponent_bits) = player_and_opponent_bits(board);
+// oriented ビットボードから合法手集合のビットマスクだけを返す。
+fn legal_moves_bitmask(player_bits: u64, opponent_bits: u64) -> u64 {
     let horizontal_opponent = opponent_bits & 0x7e7e7e7e7e7e7e7e_u64;
 
     let mut flip1 = horizontal_opponent & (player_bits << 1);
@@ -367,7 +253,201 @@ pub fn generate_legal_moves(board: &Board) -> LegalMoves {
     moves |= flip7 >> 7;
     moves |= flip9 >> 9;
     moves |= flip8 >> 8;
-    moves &= !(player_bits | opponent_bits);
+    moves & !(player_bits | opponent_bits)
+}
+
+// oriented ビットボードに対して着手時の反転ビットを返す。
+fn flips_for_move_bits(player_bits: u64, opponent_bits: u64, square: u8) -> u64 {
+    if square >= 64 {
+        return 0;
+    }
+
+    let move_bit = 1u64 << square;
+    if (player_bits | opponent_bits) & move_bit != 0 {
+        return 0;
+    }
+
+    let mut flips = 0u64;
+    macro_rules! collect_flips {
+        ($shift:expr, $mask:expr) => {{
+            let mut line = $shift(move_bit) & $mask & opponent_bits;
+            line |= $shift(line) & $mask & opponent_bits;
+            line |= $shift(line) & $mask & opponent_bits;
+            line |= $shift(line) & $mask & opponent_bits;
+            line |= $shift(line) & $mask & opponent_bits;
+            line |= $shift(line) & $mask & opponent_bits;
+            if $shift(line) & $mask & player_bits != 0u64 {
+                flips |= line;
+            }
+        }};
+    }
+
+    collect_flips!(|bits| bits << 1, NOT_A_FILE);
+    collect_flips!(|bits| bits >> 1, NOT_H_FILE);
+    collect_flips!(|bits| bits << 8, u64::MAX);
+    collect_flips!(|bits| bits >> 8, u64::MAX);
+    collect_flips!(|bits| bits << 9, NOT_A_FILE);
+    collect_flips!(|bits| bits << 7, NOT_H_FILE);
+    collect_flips!(|bits| bits >> 7, NOT_A_FILE);
+    collect_flips!(|bits| bits >> 9, NOT_H_FILE);
+
+    flips
+}
+
+// oriented ビットボードに合法手を適用し、次手番視点の player / opponent を返す。
+fn apply_move_bits_unchecked(player_bits: u64, opponent_bits: u64, square: u8) -> (u64, u64) {
+    let move_bit = 1u64 << square;
+    let flips = flips_for_move_bits(player_bits, opponent_bits, square);
+    let next_player = opponent_bits ^ flips;
+    let next_opponent = (player_bits ^ flips) ^ move_bit;
+    (next_player, next_opponent)
+}
+
+// 合法手である前提で着手を反映した次局面を返す。
+pub fn apply_move_unchecked(board: &Board, mv: Move) -> Board {
+    let (player_bits, opponent_bits) = player_and_opponent_bits(board);
+    let flips = flips_for_move_bits(player_bits, opponent_bits, mv.square);
+    let move_bit = 1u64 << mv.square;
+
+    match board.side_to_move {
+        Color::Black => Board {
+            black_bits: board.black_bits | move_bit | flips,
+            white_bits: board.white_bits & !flips,
+            side_to_move: Color::White,
+        },
+        Color::White => Board {
+            black_bits: board.black_bits & !flips,
+            white_bits: board.white_bits | move_bit | flips,
+            side_to_move: Color::Black,
+        },
+    }
+}
+
+// 合法性を確認してから着手を反映した次局面を返す。
+pub fn apply_move(board: &Board, mv: Move) -> Result<Board, MoveError> {
+    if flips_for_move(board, mv) == 0 {
+        return Err(MoveError::IllegalMove);
+    }
+
+    Ok(apply_move_unchecked(board, mv))
+}
+
+// 強制パス局面でのみ手番を反転した盤面を返す。
+pub fn apply_forced_pass(board: &Board) -> Result<Board, MoveError> {
+    match board_status(board) {
+        BoardStatus::Ongoing => Err(MoveError::PassNotAllowed),
+        BoardStatus::ForcedPass => Ok(board_with_side_to_move(
+            board,
+            match board.side_to_move {
+                Color::Black => Color::White,
+                Color::White => Color::Black,
+            },
+        )),
+        BoardStatus::Terminal => Err(MoveError::TerminalBoard),
+    }
+}
+
+// 現局面が継続中、強制パス、終局のどれかを返す。
+pub fn board_status(board: &Board) -> BoardStatus {
+    if generate_legal_moves(board).count > 0 {
+        return BoardStatus::Ongoing;
+    }
+
+    let opponent_board = board_with_side_to_move(
+        board,
+        match board.side_to_move {
+            Color::Black => Color::White,
+            Color::White => Color::Black,
+        },
+    );
+
+    if generate_legal_moves(&opponent_board).count > 0 {
+        BoardStatus::ForcedPass
+    } else {
+        BoardStatus::Terminal
+    }
+}
+
+// oriented ビットボードのまま Perft を再帰実行する。
+fn perft_with_mode_bits(player_bits: u64, opponent_bits: u64, depth: u8, mode: PerftMode) -> u64 {
+    if depth == 0 {
+        return 1;
+    }
+
+    let legal = legal_moves_bitmask(player_bits, opponent_bits);
+    if legal != 0 {
+        if depth == 1 {
+            return legal.count_ones() as u64;
+        }
+        if depth == 2 {
+            let mut bitmask = legal;
+            let mut nodes = 0u64;
+
+            while bitmask != 0 {
+                let square = bitmask.trailing_zeros() as u8;
+                let (next_player, next_opponent) =
+                    apply_move_bits_unchecked(player_bits, opponent_bits, square);
+                let next_legal = legal_moves_bitmask(next_player, next_opponent);
+
+                if next_legal != 0 {
+                    nodes += next_legal.count_ones() as u64;
+                } else {
+                    let reply_legal = legal_moves_bitmask(next_opponent, next_player);
+                    if reply_legal == 0 {
+                        nodes += 1;
+                    } else {
+                        nodes += match mode {
+                            PerftMode::Mode1 => 1,
+                            PerftMode::Mode2 => reply_legal.count_ones() as u64,
+                        };
+                    }
+                }
+
+                bitmask &= bitmask - 1;
+            }
+
+            return nodes;
+        }
+
+        let mut bitmask = legal;
+        let mut nodes = 0u64;
+
+        while bitmask != 0 {
+            let square = bitmask.trailing_zeros() as u8;
+            let (next_player, next_opponent) =
+                apply_move_bits_unchecked(player_bits, opponent_bits, square);
+            nodes += perft_with_mode_bits(next_player, next_opponent, depth - 1, mode);
+            bitmask &= bitmask - 1;
+        }
+
+        return nodes;
+    }
+
+    if legal_moves_bitmask(opponent_bits, player_bits) == 0 {
+        1
+    } else {
+        match mode {
+            PerftMode::Mode1 => perft_with_mode_bits(opponent_bits, player_bits, depth - 1, mode),
+            PerftMode::Mode2 => perft_with_mode_bits(opponent_bits, player_bits, depth, mode),
+        }
+    }
+}
+
+// Perft の再帰本体をモード差だけ切り替えながら実行する。
+fn perft_with_mode(board: &Board, depth: u8, mode: PerftMode) -> u64 {
+    let (player_bits, opponent_bits) = player_and_opponent_bits(board);
+    perft_with_mode_bits(player_bits, opponent_bits, depth, mode)
+}
+
+// モード差を切り替えながら Perft の葉数を返す。
+pub fn perft(board: &Board, depth: u8, mode: u8) -> Result<u64, PerftError> {
+    Ok(perft_with_mode(board, depth, PerftMode::try_from(mode)?))
+}
+
+// ビットボード演算で現在手番の合法手を列挙する。
+pub fn generate_legal_moves(board: &Board) -> LegalMoves {
+    let (player_bits, opponent_bits) = player_and_opponent_bits(board);
+    let moves = legal_moves_bitmask(player_bits, opponent_bits);
 
     LegalMoves {
         bitmask: moves,
@@ -385,9 +465,10 @@ fn _core(_py: Python<'_>, _module: &Bound<'_, PyModule>) -> PyResult<()> {
 mod tests {
     use super::{
         Board, BoardError, BoardStatus, Color, D4, D5, E4, E5, LegalMoves, Move, MoveError,
-        PerftError, apply_forced_pass, apply_move, apply_move_unchecked, board_status,
-        flips_for_move, generate_legal_moves, perft,
+        PerftError, PerftMode, apply_forced_pass, apply_move, apply_move_unchecked, board_status,
+        flips_for_move, generate_legal_moves, perft, perft_with_mode,
     };
+    use rayon::prelude::*;
 
     // 1 マス分のビットを作る簡易ヘルパー。
     fn bit(square: u8) -> u64 {
@@ -600,20 +681,29 @@ mod tests {
         let board = Board::new_initial();
         let legal = generate_legal_moves(&board);
         let moves = legal_move_list(legal);
-        let mut total = 0u64;
+        let mode_u8 = mode;
+        let mode = PerftMode::try_from(mode).unwrap();
+        let mut results: Vec<(u8, u64)> = moves
+            .par_iter()
+            .map(|mv| {
+                let next = apply_move_unchecked(&board, *mv);
+                let child = perft_with_mode(&next, depth - 1, mode);
+                (mv.square, child)
+            })
+            .collect();
 
-        println!("perft mode={} depth={}", mode, depth);
-        println!("root moves: {}", moves.len());
+        results.sort_unstable_by_key(|(square, _)| *square);
+        let total: u64 = results.iter().map(|(_, child)| *child).sum();
 
-        for (index, mv) in moves.iter().enumerate() {
-            let next = apply_move_unchecked(&board, *mv);
-            let child = perft(&next, depth - 1, mode).unwrap();
-            total += child;
+        println!("perft mode={} depth={}", mode_u8, depth);
+        println!("root moves: {}", results.len());
+
+        for (index, (square, child)) in results.iter().enumerate() {
             println!(
                 "[{}/{}] square={} nodes={}",
                 index + 1,
-                moves.len(),
-                mv.square,
+                results.len(),
+                square,
                 child
             );
         }
