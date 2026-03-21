@@ -2,17 +2,18 @@
 
 ## 計測条件
 
-- date:
-- machine:
-- command:
-- build:
-- note:
+- date: 2026-03-22
+- machine: local dev machine
+- command: `cargo test --release perft_long_initial_position_mode_one_to_depth_fifteen -- --ignored --nocapture`
+- build: release
+- note: 深さ 12 / 13 到達時点の途中観測値。初回ビルド時間を含む。
 
 ## Generic
 
 | mode | depth | elapsed | note |
 | --- | ---: | ---: | --- |
-| 1 | 15 |  |  |
+| 1 | 12 | 13.78s | table-based flip + 共通基盤化後、build込み |
+| 1 | 13 | 33.70s | table-based flip + 共通基盤化後、build込み |
 | 2 | 15 |  |  |
 
 ## SIMD

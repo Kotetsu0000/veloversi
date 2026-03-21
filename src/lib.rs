@@ -1,3 +1,6 @@
+mod flip_tables;
+
+use flip_tables::{BB_DLINE02, BB_DLINE57, BB_FLIPPED, BB_H2VLINE, BB_MUL16, BB_SEED, BB_VLINE};
 use pyo3::prelude::*;
 
 // 初期局面で使う 4 マスのインデックス。
@@ -147,50 +150,115 @@ fn board_with_side_to_move(board: &Board, side_to_move: Color) -> Board {
     }
 }
 
+#[cfg(test)]
 const NOT_A_FILE: u64 = 0xfefefefefefefefe;
+#[cfg(test)]
 const NOT_H_FILE: u64 = 0x7f7f7f7f7f7f7f7f;
 
+// 内部で使う着手位置と反転ビットの組を表す。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Flip {
+    pos: u8,
+    flip: u64,
+}
+
+// 手番視点の player / opponent を保持する内部盤面表現。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct OrientedBoard {
+    player: u64,
+    opponent: u64,
+}
+
+impl OrientedBoard {
+    // 外部公開用 Board から oriented な内部表現を作る。
+    #[inline(always)]
+    fn from_board(board: &Board) -> Self {
+        let (player, opponent) = player_and_opponent_bits(board);
+        Self { player, opponent }
+    }
+
+    // oriented な内部表現を指定手番の Board へ戻す。
+    #[inline(always)]
+    fn to_board(self, side_to_move: Color) -> Board {
+        match side_to_move {
+            Color::Black => Board {
+                black_bits: self.player,
+                white_bits: self.opponent,
+                side_to_move,
+            },
+            Color::White => Board {
+                black_bits: self.opponent,
+                white_bits: self.player,
+                side_to_move,
+            },
+        }
+    }
+
+    // 現手番の合法手集合を返す。
+    #[inline(always)]
+    fn legal_moves(self) -> u64 {
+        legal_moves_bitmask(self.player, self.opponent)
+    }
+
+    // 指定マスの反転情報を返す。
+    #[inline(always)]
+    fn calc_flip(self, square: u8) -> Flip {
+        Flip {
+            pos: square,
+            flip: flips_for_move_bits(self.player, self.opponent, square),
+        }
+    }
+
+    // 合法手であることが分かっているマスの反転情報を返す。
+    #[inline(always)]
+    fn calc_flip_unchecked(self, square: u8) -> Flip {
+        Flip {
+            pos: square,
+            flip: flips_for_move_bits_unchecked(self.player, self.opponent, square),
+        }
+    }
+
+    // 着手をその場で反映し、次手番視点へ更新する。
+    #[inline(always)]
+    fn move_board(&mut self, flip: Flip) {
+        self.player ^= flip.flip;
+        self.opponent ^= flip.flip;
+        self.player ^= 1u64 << flip.pos;
+        std::mem::swap(&mut self.player, &mut self.opponent);
+    }
+
+    // 着手を戻して元の手番視点へ戻す。
+    #[inline(always)]
+    fn undo_board(&mut self, flip: Flip) {
+        std::mem::swap(&mut self.player, &mut self.opponent);
+        self.player ^= 1u64 << flip.pos;
+        self.player ^= flip.flip;
+        self.opponent ^= flip.flip;
+    }
+
+    // 着手済みの次局面をコピーとして返す。
+    #[inline(always)]
+    fn move_copy(self, flip: Flip) -> Self {
+        let mut next = self;
+        next.move_board(flip);
+        next
+    }
+
+    // パスとして手番だけを入れ替える。
+    #[inline(always)]
+    fn pass(&mut self) {
+        std::mem::swap(&mut self.player, &mut self.opponent);
+    }
+}
+
 // 指定した 1 マスへの着手で裏返る相手石をビット集合で返す。
+#[cfg(test)]
 fn flips_for_move(board: &Board, mv: Move) -> u64 {
-    if mv.square >= 64 {
-        return 0;
-    }
-
-    let move_bit = 1u64 << mv.square;
-    let (player_bits, opponent_bits) = player_and_opponent_bits(board);
-
-    if (player_bits | opponent_bits) & move_bit != 0 {
-        return 0;
-    }
-
-    let mut flips = 0u64;
-    macro_rules! collect_flips {
-        ($shift:expr, $mask:expr) => {{
-            let mut line = $shift(move_bit) & $mask & opponent_bits;
-            line |= $shift(line) & $mask & opponent_bits;
-            line |= $shift(line) & $mask & opponent_bits;
-            line |= $shift(line) & $mask & opponent_bits;
-            line |= $shift(line) & $mask & opponent_bits;
-            line |= $shift(line) & $mask & opponent_bits;
-            if $shift(line) & $mask & player_bits != 0u64 {
-                flips |= line;
-            }
-        }};
-    }
-
-    collect_flips!(|bits| bits << 1, NOT_A_FILE);
-    collect_flips!(|bits| bits >> 1, NOT_H_FILE);
-    collect_flips!(|bits| bits << 8, u64::MAX);
-    collect_flips!(|bits| bits >> 8, u64::MAX);
-    collect_flips!(|bits| bits << 9, NOT_A_FILE);
-    collect_flips!(|bits| bits << 7, NOT_H_FILE);
-    collect_flips!(|bits| bits >> 7, NOT_A_FILE);
-    collect_flips!(|bits| bits >> 9, NOT_H_FILE);
-
-    flips
+    OrientedBoard::from_board(board).calc_flip(mv.square).flip
 }
 
 // oriented ビットボードから合法手集合のビットマスクだけを返す。
+#[inline(always)]
 fn legal_moves_bitmask(player_bits: u64, opponent_bits: u64) -> u64 {
     let horizontal_opponent = opponent_bits & 0x7e7e7e7e7e7e7e7e_u64;
 
@@ -256,8 +324,74 @@ fn legal_moves_bitmask(player_bits: u64, opponent_bits: u64) -> u64 {
     moves & !(player_bits | opponent_bits)
 }
 
+// `bb_seed` を横方向専用の 4 バイト単位アクセスとして読み出す。
+#[inline(always)]
+fn horizontal_seed(index: usize, x: usize) -> u8 {
+    unsafe { *BB_SEED.as_ptr().cast::<u8>().add(index * 4 + x) }
+}
+
+// `bb_h2vline` を C++ 実装と同じく u32 オフセット経由で読み出す。
+#[inline(always)]
+fn read_h2vline(offset_u32: usize) -> u64 {
+    let row = offset_u32 >> 1;
+    if offset_u32 & 1 == 0 {
+        BB_H2VLINE[row]
+    } else {
+        (BB_H2VLINE[row] >> 32) | ((BB_H2VLINE[row + 1] & 0xffff_ffff) << 32)
+    }
+}
+
+// 斜め方向 1 本分の反転ビットを table から求める。
+#[inline(always)]
+fn diagonal_flip(line_mask: u64, player_bits: u64, opponent_bits: u64, x: usize) -> u64 {
+    let mut outflank =
+        BB_SEED[(((opponent_bits & line_mask).wrapping_mul(BB_VLINE[1])) >> 58) as usize][x];
+    outflank &= (((player_bits & line_mask).wrapping_mul(0x0101010101010101)) >> 56) as u8;
+    u64::from(BB_FLIPPED[outflank as usize][x]).wrapping_mul(0x0101010101010101) & line_mask
+}
+
 // oriented ビットボードに対して着手時の反転ビットを返す。
 fn flips_for_move_bits(player_bits: u64, opponent_bits: u64, square: u8) -> u64 {
+    if square >= 64 {
+        return 0;
+    }
+
+    let move_bit = 1u64 << square;
+    if (player_bits | opponent_bits) & move_bit != 0 {
+        return 0;
+    }
+
+    flips_for_move_bits_unchecked(player_bits, opponent_bits, square)
+}
+
+// 合法手であることが分かっているマスの反転ビットを返す。
+#[inline(always)]
+fn flips_for_move_bits_unchecked(player_bits: u64, opponent_bits: u64, square: u8) -> u64 {
+    let square = square as usize;
+    let x = square & 7;
+    let y = square >> 3;
+
+    let mut outflank =
+        ((((player_bits >> x) & 0x0101010101010101).wrapping_mul(0x0102040810204080)) >> 56) as u8;
+    outflank &=
+        BB_SEED[(((opponent_bits & BB_VLINE[x]).wrapping_mul(BB_MUL16[x])) >> 58) as usize][y];
+
+    let mut flip = read_h2vline(BB_FLIPPED[outflank as usize][y] as usize) << x;
+
+    let row_shift = square & 0x38;
+    outflank = horizontal_seed(((opponent_bits >> row_shift) & 0x7e) as usize, x);
+    outflank &= (player_bits >> row_shift) as u8;
+    flip |= u64::from(BB_FLIPPED[outflank as usize][x]) << row_shift;
+
+    flip |= diagonal_flip(BB_DLINE02[square], player_bits, opponent_bits, x);
+    flip |= diagonal_flip(BB_DLINE57[square], player_bits, opponent_bits, x);
+
+    flip
+}
+
+// 旧来の 8 方向走査版をテスト用の比較基準として残す。
+#[cfg(test)]
+fn flips_for_move_bits_scan(player_bits: u64, opponent_bits: u64, square: u8) -> u64 {
     if square >= 64 {
         return 0;
     }
@@ -294,42 +428,29 @@ fn flips_for_move_bits(player_bits: u64, opponent_bits: u64, square: u8) -> u64 
     flips
 }
 
-// oriented ビットボードに合法手を適用し、次手番視点の player / opponent を返す。
-fn apply_move_bits_unchecked(player_bits: u64, opponent_bits: u64, square: u8) -> (u64, u64) {
-    let move_bit = 1u64 << square;
-    let flips = flips_for_move_bits(player_bits, opponent_bits, square);
-    let next_player = opponent_bits ^ flips;
-    let next_opponent = (player_bits ^ flips) ^ move_bit;
-    (next_player, next_opponent)
-}
-
 // 合法手である前提で着手を反映した次局面を返す。
 pub fn apply_move_unchecked(board: &Board, mv: Move) -> Board {
-    let (player_bits, opponent_bits) = player_and_opponent_bits(board);
-    let flips = flips_for_move_bits(player_bits, opponent_bits, mv.square);
-    let move_bit = 1u64 << mv.square;
-
-    match board.side_to_move {
-        Color::Black => Board {
-            black_bits: board.black_bits | move_bit | flips,
-            white_bits: board.white_bits & !flips,
-            side_to_move: Color::White,
-        },
-        Color::White => Board {
-            black_bits: board.black_bits & !flips,
-            white_bits: board.white_bits | move_bit | flips,
-            side_to_move: Color::Black,
-        },
-    }
+    let oriented = OrientedBoard::from_board(board);
+    let next = oriented.move_copy(oriented.calc_flip(mv.square));
+    next.to_board(match board.side_to_move {
+        Color::Black => Color::White,
+        Color::White => Color::Black,
+    })
 }
 
 // 合法性を確認してから着手を反映した次局面を返す。
 pub fn apply_move(board: &Board, mv: Move) -> Result<Board, MoveError> {
-    if flips_for_move(board, mv) == 0 {
+    let oriented = OrientedBoard::from_board(board);
+    let flip = oriented.calc_flip(mv.square);
+    if flip.flip == 0 {
         return Err(MoveError::IllegalMove);
     }
 
-    Ok(apply_move_unchecked(board, mv))
+    let next = oriented.move_copy(flip);
+    Ok(next.to_board(match board.side_to_move {
+        Color::Black => Color::White,
+        Color::White => Color::Black,
+    }))
 }
 
 // 強制パス局面でのみ手番を反転した盤面を返す。
@@ -349,19 +470,12 @@ pub fn apply_forced_pass(board: &Board) -> Result<Board, MoveError> {
 
 // 現局面が継続中、強制パス、終局のどれかを返す。
 pub fn board_status(board: &Board) -> BoardStatus {
-    if generate_legal_moves(board).count > 0 {
+    let oriented = OrientedBoard::from_board(board);
+    if oriented.legal_moves() != 0 {
         return BoardStatus::Ongoing;
     }
 
-    let opponent_board = board_with_side_to_move(
-        board,
-        match board.side_to_move {
-            Color::Black => Color::White,
-            Color::White => Color::Black,
-        },
-    );
-
-    if generate_legal_moves(&opponent_board).count > 0 {
+    if legal_moves_bitmask(oriented.opponent, oriented.player) != 0 {
         BoardStatus::ForcedPass
     } else {
         BoardStatus::Terminal
@@ -369,40 +483,85 @@ pub fn board_status(board: &Board) -> BoardStatus {
 }
 
 // oriented ビットボードのまま Perft を再帰実行する。
-fn perft_with_mode_bits(player_bits: u64, opponent_bits: u64, depth: u8, mode: PerftMode) -> u64 {
+#[inline(always)]
+fn perft_count_depth_two(board: &mut OrientedBoard, legal: u64, mode: PerftMode) -> u64 {
+    let mut bitmask = legal;
+    let mut nodes = 0u64;
+
+    while bitmask != 0 {
+        let square = bitmask.trailing_zeros() as u8;
+        let flip = board.calc_flip_unchecked(square);
+        board.move_board(flip);
+        let next_legal = board.legal_moves();
+
+        if next_legal != 0 {
+            nodes += next_legal.count_ones() as u64;
+        } else {
+            board.pass();
+            let reply_legal = board.legal_moves();
+            board.pass();
+            if reply_legal == 0 {
+                nodes += 1;
+            } else {
+                nodes += match mode {
+                    PerftMode::Mode1 => 1,
+                    PerftMode::Mode2 => reply_legal.count_ones() as u64,
+                };
+            }
+        }
+
+        board.undo_board(flip);
+        bitmask &= bitmask - 1;
+    }
+
+    nodes
+}
+
+// oriented ビットボードのまま Perft を再帰実行する。
+#[inline(always)]
+fn perft_with_mode_oriented(
+    board: &mut OrientedBoard,
+    depth: u8,
+    mode: PerftMode,
+    passed: bool,
+) -> u64 {
     if depth == 0 {
         return 1;
     }
 
-    let legal = legal_moves_bitmask(player_bits, opponent_bits);
+    let legal = board.legal_moves();
     if legal != 0 {
         if depth == 1 {
             return legal.count_ones() as u64;
         }
         if depth == 2 {
+            return perft_count_depth_two(board, legal, mode);
+        }
+        if depth == 3 {
             let mut bitmask = legal;
             let mut nodes = 0u64;
 
             while bitmask != 0 {
                 let square = bitmask.trailing_zeros() as u8;
-                let (next_player, next_opponent) =
-                    apply_move_bits_unchecked(player_bits, opponent_bits, square);
-                let next_legal = legal_moves_bitmask(next_player, next_opponent);
-
+                let flip = board.calc_flip_unchecked(square);
+                board.move_board(flip);
+                let next_legal = board.legal_moves();
                 if next_legal != 0 {
-                    nodes += next_legal.count_ones() as u64;
+                    nodes += perft_count_depth_two(board, next_legal, mode);
                 } else {
-                    let reply_legal = legal_moves_bitmask(next_opponent, next_player);
+                    board.pass();
+                    let reply_legal = board.legal_moves();
                     if reply_legal == 0 {
                         nodes += 1;
                     } else {
                         nodes += match mode {
-                            PerftMode::Mode1 => 1,
-                            PerftMode::Mode2 => reply_legal.count_ones() as u64,
+                            PerftMode::Mode1 => reply_legal.count_ones() as u64,
+                            PerftMode::Mode2 => perft_count_depth_two(board, reply_legal, mode),
                         };
                     }
+                    board.pass();
                 }
-
+                board.undo_board(flip);
                 bitmask &= bitmask - 1;
             }
 
@@ -414,29 +573,37 @@ fn perft_with_mode_bits(player_bits: u64, opponent_bits: u64, depth: u8, mode: P
 
         while bitmask != 0 {
             let square = bitmask.trailing_zeros() as u8;
-            let (next_player, next_opponent) =
-                apply_move_bits_unchecked(player_bits, opponent_bits, square);
-            nodes += perft_with_mode_bits(next_player, next_opponent, depth - 1, mode);
+            let flip = board.calc_flip_unchecked(square);
+            board.move_board(flip);
+            nodes += perft_with_mode_oriented(board, depth - 1, mode, false);
+            board.undo_board(flip);
             bitmask &= bitmask - 1;
         }
 
         return nodes;
     }
 
-    if legal_moves_bitmask(opponent_bits, player_bits) == 0 {
+    if passed {
         1
     } else {
-        match mode {
-            PerftMode::Mode1 => perft_with_mode_bits(opponent_bits, player_bits, depth - 1, mode),
-            PerftMode::Mode2 => perft_with_mode_bits(opponent_bits, player_bits, depth, mode),
-        }
+        board.pass();
+        let res = if board.legal_moves() == 0 {
+            1
+        } else {
+            match mode {
+                PerftMode::Mode1 => perft_with_mode_oriented(board, depth - 1, mode, true),
+                PerftMode::Mode2 => perft_with_mode_oriented(board, depth, mode, true),
+            }
+        };
+        board.pass();
+        res
     }
 }
 
 // Perft の再帰本体をモード差だけ切り替えながら実行する。
 fn perft_with_mode(board: &Board, depth: u8, mode: PerftMode) -> u64 {
-    let (player_bits, opponent_bits) = player_and_opponent_bits(board);
-    perft_with_mode_bits(player_bits, opponent_bits, depth, mode)
+    let mut oriented = OrientedBoard::from_board(board);
+    perft_with_mode_oriented(&mut oriented, depth, mode, false)
 }
 
 // モード差を切り替えながら Perft の葉数を返す。
@@ -446,8 +613,7 @@ pub fn perft(board: &Board, depth: u8, mode: u8) -> Result<u64, PerftError> {
 
 // ビットボード演算で現在手番の合法手を列挙する。
 pub fn generate_legal_moves(board: &Board) -> LegalMoves {
-    let (player_bits, opponent_bits) = player_and_opponent_bits(board);
-    let moves = legal_moves_bitmask(player_bits, opponent_bits);
+    let moves = OrientedBoard::from_board(board).legal_moves();
 
     LegalMoves {
         bitmask: moves,
@@ -464,9 +630,11 @@ fn _core(_py: Python<'_>, _module: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Board, BoardError, BoardStatus, Color, D4, D5, E4, E5, LegalMoves, Move, MoveError,
-        PerftError, PerftMode, apply_forced_pass, apply_move, apply_move_unchecked, board_status,
-        flips_for_move, generate_legal_moves, perft, perft_with_mode,
+        BB_H2VLINE, BB_SEED, Board, BoardError, BoardStatus, Color, D4, D5, E4, E5, LegalMoves,
+        Move, MoveError, OrientedBoard, PerftError, PerftMode, apply_forced_pass, apply_move,
+        apply_move_unchecked, board_status, board_with_side_to_move, flips_for_move,
+        flips_for_move_bits_scan, generate_legal_moves, horizontal_seed, perft,
+        perft_with_mode_oriented, read_h2vline,
     };
     use rayon::prelude::*;
 
@@ -613,6 +781,20 @@ mod tests {
         flips
     }
 
+    // table 版と旧走査版が同じ反転ビットを返すことを直接確認する。
+    fn assert_flip_implementations_match(board: &Board, mv: Move) {
+        let (player_bits, opponent_bits) = match board.side_to_move {
+            Color::Black => (board.black_bits, board.white_bits),
+            Color::White => (board.white_bits, board.black_bits),
+        };
+
+        assert_eq!(
+            flips_for_move(board, mv),
+            flips_for_move_bits_scan(player_bits, opponent_bits, mv.square)
+        );
+        assert_eq!(flips_for_move(board, mv), flips_for_move_naive(board, mv));
+    }
+
     // 素朴実装で合法手を 1 手適用した結果を返す。
     fn apply_move_naive(board: &Board, mv: Move) -> Result<Board, MoveError> {
         let flips = flips_for_move_naive(board, mv);
@@ -633,6 +815,171 @@ mod tests {
                 side_to_move: Color::Black,
             },
         })
+    }
+
+    // 素朴実装で Perft を計算し、内部再帰との照合に使う。
+    fn perft_naive(board: &Board, depth: u8, mode: PerftMode, passed: bool) -> u64 {
+        if depth == 0 {
+            return 1;
+        }
+
+        let legal = generate_legal_moves_naive(board);
+        if legal.count == 0 {
+            if passed {
+                return 1;
+            }
+
+            let passed_board = board_with_side_to_move(
+                board,
+                match board.side_to_move {
+                    Color::Black => Color::White,
+                    Color::White => Color::Black,
+                },
+            );
+
+            return match mode {
+                PerftMode::Mode1 => perft_naive(&passed_board, depth - 1, mode, true),
+                PerftMode::Mode2 => perft_naive(&passed_board, depth, mode, true),
+            };
+        }
+
+        if depth == 1 {
+            return legal.count as u64;
+        }
+
+        legal_move_list(legal)
+            .into_iter()
+            .map(|mv| {
+                let next = apply_move_naive(board, mv).unwrap();
+                perft_naive(&next, depth - 1, mode, false)
+            })
+            .sum()
+    }
+
+    // depth 2 の終局分岐と強制パス分岐を踏む局面を決定的に探索する。
+    fn find_depth_two_branch_examples() -> (Board, Move, Board, Move) {
+        let mut seed = 0x91c7_2d4a_5be3_f801_u64;
+        let mut terminal_example = None;
+        let mut forced_example = None;
+
+        for _ in 0..200_000 {
+            seed ^= seed << 7;
+            seed ^= seed >> 9;
+            let occupancy = seed;
+
+            seed ^= seed << 7;
+            seed ^= seed >> 9;
+            let black_bits = seed & occupancy;
+            let white_bits = occupancy & !black_bits;
+
+            seed ^= seed << 7;
+            seed ^= seed >> 9;
+            let side_to_move = if seed & 1 == 0 {
+                Color::Black
+            } else {
+                Color::White
+            };
+
+            let board = Board {
+                black_bits,
+                white_bits,
+                side_to_move,
+            };
+
+            for mv in legal_move_list(generate_legal_moves(&board)) {
+                let next = apply_move_naive(&board, mv).unwrap();
+                let next_legal = generate_legal_moves(&next);
+                if next_legal.count != 0 {
+                    continue;
+                }
+
+                let reply_board = board_with_side_to_move(
+                    &next,
+                    match next.side_to_move {
+                        Color::Black => Color::White,
+                        Color::White => Color::Black,
+                    },
+                );
+                let reply_legal = generate_legal_moves(&reply_board);
+
+                if reply_legal.count == 0 && terminal_example.is_none() {
+                    terminal_example = Some((board, mv));
+                } else if reply_legal.count > 0 && forced_example.is_none() {
+                    forced_example = Some((board, mv));
+                }
+
+                if let (Some(terminal), Some(forced)) = (terminal_example, forced_example) {
+                    return (terminal.0, terminal.1, forced.0, forced.1);
+                }
+            }
+        }
+
+        panic!("depth 2 branch examples not found");
+    }
+
+    // depth 3 の終局分岐と強制パス分岐を踏む局面を決定的に探索する。
+    fn find_depth_three_branch_examples() -> (Board, Board) {
+        let mut seed = 0x73e1_9ac4_0db2_f615_u64;
+        let mut terminal_example = None;
+        let mut forced_example = None;
+
+        for _ in 0..300_000 {
+            seed ^= seed << 7;
+            seed ^= seed >> 9;
+            let occupancy = seed;
+
+            seed ^= seed << 7;
+            seed ^= seed >> 9;
+            let black_bits = seed & occupancy;
+            let white_bits = occupancy & !black_bits;
+
+            seed ^= seed << 7;
+            seed ^= seed >> 9;
+            let side_to_move = if seed & 1 == 0 {
+                Color::Black
+            } else {
+                Color::White
+            };
+
+            let board = Board {
+                black_bits,
+                white_bits,
+                side_to_move,
+            };
+            let legal = legal_move_list(generate_legal_moves(&board));
+            if legal.is_empty() {
+                continue;
+            }
+
+            for mv in legal {
+                let next = apply_move_naive(&board, mv).unwrap();
+                let next_legal = generate_legal_moves(&next);
+                if next_legal.count != 0 {
+                    continue;
+                }
+
+                let reply_board = board_with_side_to_move(
+                    &next,
+                    match next.side_to_move {
+                        Color::Black => Color::White,
+                        Color::White => Color::Black,
+                    },
+                );
+                let reply_legal = generate_legal_moves(&reply_board);
+
+                if reply_legal.count == 0 && terminal_example.is_none() {
+                    terminal_example = Some(board);
+                } else if reply_legal.count > 0 && forced_example.is_none() {
+                    forced_example = Some(board);
+                }
+
+                if let (Some(terminal), Some(forced)) = (terminal_example, forced_example) {
+                    return (terminal, forced);
+                }
+            }
+        }
+
+        panic!("depth 3 branch examples not found");
     }
 
     // 盤面上の合法手をビット集合から列挙する。
@@ -683,11 +1030,12 @@ mod tests {
         let moves = legal_move_list(legal);
         let mode_u8 = mode;
         let mode = PerftMode::try_from(mode).unwrap();
+        let oriented = OrientedBoard::from_board(&board);
         let mut results: Vec<(u8, u64)> = moves
             .par_iter()
             .map(|mv| {
-                let next = apply_move_unchecked(&board, *mv);
-                let child = perft_with_mode(&next, depth - 1, mode);
+                let mut next = oriented.move_copy(oriented.calc_flip_unchecked(mv.square));
+                let child = perft_with_mode_oriented(&mut next, depth - 1, mode, false);
                 (mv.square, child)
             })
             .collect();
@@ -859,7 +1207,7 @@ mod tests {
         };
 
         assert_eq!(flips_for_move(&board, mv), bit(square(4, 3)));
-        assert_eq!(flips_for_move(&board, mv), flips_for_move_naive(&board, mv));
+        assert_flip_implementations_match(&board, mv);
     }
 
     #[test]
@@ -897,7 +1245,34 @@ mod tests {
             | bit(square(4, 4));
 
         assert_eq!(flips_for_move(&board, mv), expected);
-        assert_eq!(flips_for_move(&board, mv), flips_for_move_naive(&board, mv));
+        assert_flip_implementations_match(&board, mv);
+    }
+
+    #[test]
+    fn flips_for_move_matches_scan_implementation_for_curated_positions() {
+        // table 版と旧走査版が代表局面の全合法手で一致することを確認する。
+        let positions = [
+            Board::new_initial(),
+            Board {
+                black_bits: bit(square(3, 3)) | bit(square(4, 3)) | bit(square(3, 4)),
+                white_bits: bit(square(4, 4)),
+                side_to_move: Color::White,
+            },
+            Board {
+                black_bits: bit(square(0, 0))
+                    | bit(square(2, 0))
+                    | bit(square(0, 2))
+                    | bit(square(7, 7)),
+                white_bits: bit(square(1, 0)) | bit(square(0, 1)) | bit(square(6, 6)),
+                side_to_move: Color::Black,
+            },
+        ];
+
+        for board in positions {
+            for mv in legal_move_list(generate_legal_moves_naive(&board)) {
+                assert_flip_implementations_match(&board, mv);
+            }
+        }
     }
 
     #[test]
@@ -1068,12 +1443,93 @@ mod tests {
 
         for board in positions {
             for mv in legal_move_list(generate_legal_moves(&board)) {
-                assert_eq!(flips_for_move(&board, mv), flips_for_move_naive(&board, mv));
+                assert_flip_implementations_match(&board, mv);
                 assert_eq!(apply_move(&board, mv), apply_move_naive(&board, mv));
                 assert_eq!(
                     apply_move_unchecked(&board, mv),
                     apply_move_naive(&board, mv).unwrap()
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn oriented_move_and_undo_restore_original_state() {
+        // 共通内部基盤の move / undo が全合法手で元の oriented 状態へ戻ることを確認する。
+        let positions = [
+            Board::new_initial(),
+            Board {
+                black_bits: bit(square(3, 3)) | bit(square(4, 3)) | bit(square(3, 4)),
+                white_bits: bit(square(4, 4)),
+                side_to_move: Color::White,
+            },
+            Board {
+                black_bits: bit(square(0, 0))
+                    | bit(square(2, 0))
+                    | bit(square(0, 2))
+                    | bit(square(7, 7)),
+                white_bits: bit(square(1, 0)) | bit(square(0, 1)) | bit(square(6, 6)),
+                side_to_move: Color::Black,
+            },
+        ];
+
+        for board in positions {
+            let original = OrientedBoard::from_board(&board);
+            for mv in legal_move_list(generate_legal_moves(&board)) {
+                let mut oriented = original;
+                let flip = oriented.calc_flip_unchecked(mv.square);
+                oriented.move_board(flip);
+                oriented.undo_board(flip);
+                assert_eq!(oriented, original);
+            }
+        }
+    }
+
+    #[test]
+    fn oriented_move_matches_public_apply_result() {
+        // oriented 基盤の move_copy が公開 API の apply_move と同じ盤面を生成することを確認する。
+        let positions = [
+            Board::new_initial(),
+            Board {
+                black_bits: bit(square(3, 3)) | bit(square(4, 3)) | bit(square(3, 4)),
+                white_bits: bit(square(4, 4)),
+                side_to_move: Color::White,
+            },
+        ];
+
+        for board in positions {
+            let oriented = OrientedBoard::from_board(&board);
+            let next_side = match board.side_to_move {
+                Color::Black => Color::White,
+                Color::White => Color::Black,
+            };
+            for mv in legal_move_list(generate_legal_moves(&board)) {
+                let next = oriented
+                    .move_copy(oriented.calc_flip_unchecked(mv.square))
+                    .to_board(next_side);
+                assert_eq!(next, apply_move(&board, mv).unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn oriented_move_board_updates_internal_state_as_expected() {
+        // move_board 後の oriented 状態が素朴実装の次局面と一致することを確認する。
+        let positions = [
+            Board::new_initial(),
+            Board {
+                black_bits: bit(square(3, 3)) | bit(square(4, 3)) | bit(square(3, 4)),
+                white_bits: bit(square(4, 4)),
+                side_to_move: Color::White,
+            },
+        ];
+
+        for board in positions {
+            for mv in legal_move_list(generate_legal_moves(&board)) {
+                let expected = OrientedBoard::from_board(&apply_move_naive(&board, mv).unwrap());
+                let mut oriented = OrientedBoard::from_board(&board);
+                oriented.move_board(oriented.calc_flip_unchecked(mv.square));
+                assert_eq!(oriented, expected);
             }
         }
     }
@@ -1109,13 +1565,76 @@ mod tests {
             let legal = generate_legal_moves(&board);
 
             for mv in legal_move_list(legal) {
-                assert_eq!(flips_for_move(&board, mv), flips_for_move_naive(&board, mv));
+                assert_flip_implementations_match(&board, mv);
                 assert_eq!(apply_move(&board, mv), apply_move_naive(&board, mv));
                 assert_eq!(
                     apply_move_unchecked(&board, mv),
                     apply_move_naive(&board, mv).unwrap()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn flips_for_move_matches_scan_implementation_for_deterministic_random_positions() {
+        // table 版と旧走査版が決定的ランダム局面でも一致することを確認する。
+        let mut seed = 0x5e87_0fd4_a9b2_c361_u64;
+
+        for _ in 0..256 {
+            seed ^= seed << 7;
+            seed ^= seed >> 9;
+            let occupancy = seed;
+
+            seed ^= seed << 7;
+            seed ^= seed >> 9;
+            let black_bits = seed & occupancy;
+            let white_bits = occupancy & !black_bits;
+
+            seed ^= seed << 7;
+            seed ^= seed >> 9;
+            let side_to_move = if seed & 1 == 0 {
+                Color::Black
+            } else {
+                Color::White
+            };
+
+            let board = Board {
+                black_bits,
+                white_bits,
+                side_to_move,
+            };
+
+            for mv in legal_move_list(generate_legal_moves_naive(&board)) {
+                assert_flip_implementations_match(&board, mv);
+            }
+        }
+    }
+
+    #[test]
+    fn horizontal_seed_matches_flat_seed_layout() {
+        // C++ 側の 4 バイト単位キャストと同じ位置を読めていることを確認する。
+        let flat: Vec<u8> = BB_SEED.iter().flat_map(|row| row.iter().copied()).collect();
+
+        for index in 0..=126usize {
+            for x in 0..8usize {
+                let byte_index = index * 4 + x;
+                assert_eq!(horizontal_seed(index, x), flat[byte_index]);
+            }
+        }
+    }
+
+    #[test]
+    fn read_h2vline_matches_unaligned_little_endian_view() {
+        // C++ 側の u32 オフセット + u64 読み出しと同じ値を返すことを確認する。
+        let bytes: Vec<u8> = BB_H2VLINE
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+
+        for offset in 0..=126usize {
+            let expected =
+                u64::from_le_bytes(bytes[offset * 4..offset * 4 + 8].try_into().unwrap());
+            assert_eq!(read_h2vline(offset), expected);
         }
     }
 
@@ -1222,6 +1741,166 @@ mod tests {
         assert_eq!(perft(&board, 1, 1), Ok(1));
         assert_eq!(perft(&board, 1, 2), Ok(5));
         assert_ne!(perft(&board, 1, 1), perft(&board, 1, 2));
+    }
+
+    #[test]
+    fn internal_perft_matches_naive_oracle_for_curated_positions() {
+        // 内部 Perft 再帰が代表局面群で素朴実装と一致することを確認する。
+        let positions = [
+            Board::new_initial(),
+            perft_forced_pass_difference_board(),
+            Board {
+                black_bits: bit(square(3, 3)) | bit(square(4, 3)) | bit(square(3, 4)),
+                white_bits: bit(square(4, 4)),
+                side_to_move: Color::White,
+            },
+        ];
+
+        for board in positions {
+            for depth in 0..=4 {
+                let mut oriented = OrientedBoard::from_board(&board);
+                assert_eq!(
+                    perft_with_mode_oriented(&mut oriented, depth, PerftMode::Mode1, false),
+                    perft_naive(&board, depth, PerftMode::Mode1, false)
+                );
+
+                let mut oriented = OrientedBoard::from_board(&board);
+                assert_eq!(
+                    perft_with_mode_oriented(&mut oriented, depth, PerftMode::Mode2, false),
+                    perft_naive(&board, depth, PerftMode::Mode2, false)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn internal_perft_matches_naive_oracle_for_deterministic_random_positions() {
+        // 内部 Perft 再帰がさまざまな局面で素朴実装と一致することを確認する。
+        let mut seed = 0x4d31_8ab7_c205_f19e_u64;
+
+        for _ in 0..64 {
+            seed ^= seed << 7;
+            seed ^= seed >> 9;
+            let occupancy = seed;
+
+            seed ^= seed << 7;
+            seed ^= seed >> 9;
+            let black_bits = seed & occupancy;
+            let white_bits = occupancy & !black_bits;
+
+            seed ^= seed << 7;
+            seed ^= seed >> 9;
+            let side_to_move = if seed & 1 == 0 {
+                Color::Black
+            } else {
+                Color::White
+            };
+
+            let board = Board {
+                black_bits,
+                white_bits,
+                side_to_move,
+            };
+
+            for depth in 0..=3 {
+                let mut oriented = OrientedBoard::from_board(&board);
+                assert_eq!(
+                    perft_with_mode_oriented(&mut oriented, depth, PerftMode::Mode1, false),
+                    perft_naive(&board, depth, PerftMode::Mode1, false)
+                );
+
+                let mut oriented = OrientedBoard::from_board(&board);
+                assert_eq!(
+                    perft_with_mode_oriented(&mut oriented, depth, PerftMode::Mode2, false),
+                    perft_naive(&board, depth, PerftMode::Mode2, false)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn internal_perft_depth_two_matches_terminal_and_forced_pass_examples() {
+        // depth 2 の終局分岐と強制パス分岐が素朴実装と一致することを確認する。
+        let (terminal_board, terminal_move, forced_board, forced_move) =
+            find_depth_two_branch_examples();
+
+        let terminal_next = apply_move_naive(&terminal_board, terminal_move).unwrap();
+        assert_eq!(generate_legal_moves(&terminal_next).count, 0);
+        assert_eq!(
+            generate_legal_moves(&board_with_side_to_move(
+                &terminal_next,
+                match terminal_next.side_to_move {
+                    Color::Black => Color::White,
+                    Color::White => Color::Black,
+                },
+            ))
+            .count,
+            0
+        );
+
+        let forced_next = apply_move_naive(&forced_board, forced_move).unwrap();
+        assert_eq!(generate_legal_moves(&forced_next).count, 0);
+        assert!(
+            generate_legal_moves(&board_with_side_to_move(
+                &forced_next,
+                match forced_next.side_to_move {
+                    Color::Black => Color::White,
+                    Color::White => Color::Black,
+                },
+            ))
+            .count
+                > 0
+        );
+
+        let mut oriented = OrientedBoard::from_board(&terminal_board);
+        assert_eq!(
+            perft_with_mode_oriented(&mut oriented, 2, PerftMode::Mode1, false),
+            perft_naive(&terminal_board, 2, PerftMode::Mode1, false)
+        );
+        let mut oriented = OrientedBoard::from_board(&terminal_board);
+        assert_eq!(
+            perft_with_mode_oriented(&mut oriented, 2, PerftMode::Mode2, false),
+            perft_naive(&terminal_board, 2, PerftMode::Mode2, false)
+        );
+
+        let mut oriented = OrientedBoard::from_board(&forced_board);
+        assert_eq!(
+            perft_with_mode_oriented(&mut oriented, 2, PerftMode::Mode1, false),
+            perft_naive(&forced_board, 2, PerftMode::Mode1, false)
+        );
+        let mut oriented = OrientedBoard::from_board(&forced_board);
+        assert_eq!(
+            perft_with_mode_oriented(&mut oriented, 2, PerftMode::Mode2, false),
+            perft_naive(&forced_board, 2, PerftMode::Mode2, false)
+        );
+    }
+
+    #[test]
+    fn internal_perft_depth_three_matches_terminal_and_forced_pass_examples() {
+        // depth 3 の終局分岐と強制パス分岐が素朴実装と一致することを確認する。
+        let (terminal_board, forced_board) = find_depth_three_branch_examples();
+
+        let mut oriented = OrientedBoard::from_board(&terminal_board);
+        assert_eq!(
+            perft_with_mode_oriented(&mut oriented, 3, PerftMode::Mode1, false),
+            perft_naive(&terminal_board, 3, PerftMode::Mode1, false)
+        );
+        let mut oriented = OrientedBoard::from_board(&terminal_board);
+        assert_eq!(
+            perft_with_mode_oriented(&mut oriented, 3, PerftMode::Mode2, false),
+            perft_naive(&terminal_board, 3, PerftMode::Mode2, false)
+        );
+
+        let mut oriented = OrientedBoard::from_board(&forced_board);
+        assert_eq!(
+            perft_with_mode_oriented(&mut oriented, 3, PerftMode::Mode1, false),
+            perft_naive(&forced_board, 3, PerftMode::Mode1, false)
+        );
+        let mut oriented = OrientedBoard::from_board(&forced_board);
+        assert_eq!(
+            perft_with_mode_oriented(&mut oriented, 3, PerftMode::Mode2, false),
+            perft_naive(&forced_board, 3, PerftMode::Mode2, false)
+        );
     }
 
     #[test]
