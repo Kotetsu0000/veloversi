@@ -40,6 +40,14 @@ pub struct LegalMoves {
     pub count: u8,
 }
 
+// 現局面の進行状態を表す。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoardStatus {
+    Ongoing,
+    ForcedPass,
+    Terminal,
+}
+
 // 着手適用で起こりうる失敗理由を表す。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MoveError {
@@ -102,6 +110,15 @@ fn player_and_opponent_bits(board: &Board) -> (u64, u64) {
     match board.side_to_move {
         Color::Black => (board.black_bits, board.white_bits),
         Color::White => (board.white_bits, board.black_bits),
+    }
+}
+
+// 石配置を保ったまま手番だけを差し替えた盤面を返す。
+fn board_with_side_to_move(board: &Board, side_to_move: Color) -> Board {
+    Board {
+        black_bits: board.black_bits,
+        white_bits: board.white_bits,
+        side_to_move,
     }
 }
 
@@ -186,6 +203,42 @@ pub fn apply_move(board: &Board, mv: Move) -> Result<Board, MoveError> {
     Ok(apply_move_unchecked(board, mv))
 }
 
+// 強制パス局面でのみ手番を反転した盤面を返す。
+pub fn apply_forced_pass(board: &Board) -> Result<Board, MoveError> {
+    match board_status(board) {
+        BoardStatus::Ongoing => Err(MoveError::PassNotAllowed),
+        BoardStatus::ForcedPass => Ok(board_with_side_to_move(
+            board,
+            match board.side_to_move {
+                Color::Black => Color::White,
+                Color::White => Color::Black,
+            },
+        )),
+        BoardStatus::Terminal => Err(MoveError::TerminalBoard),
+    }
+}
+
+// 現局面が継続中、強制パス、終局のどれかを返す。
+pub fn board_status(board: &Board) -> BoardStatus {
+    if generate_legal_moves(board).count > 0 {
+        return BoardStatus::Ongoing;
+    }
+
+    let opponent_board = board_with_side_to_move(
+        board,
+        match board.side_to_move {
+            Color::Black => Color::White,
+            Color::White => Color::Black,
+        },
+    );
+
+    if generate_legal_moves(&opponent_board).count > 0 {
+        BoardStatus::ForcedPass
+    } else {
+        BoardStatus::Terminal
+    }
+}
+
 // ビットボード演算で現在手番の合法手を列挙する。
 pub fn generate_legal_moves(board: &Board) -> LegalMoves {
     let (player_bits, opponent_bits) = player_and_opponent_bits(board);
@@ -267,8 +320,9 @@ fn _core(_py: Python<'_>, _module: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Board, BoardError, Color, D4, D5, E4, E5, LegalMoves, Move, MoveError, apply_move,
-        apply_move_unchecked, flips_for_move, generate_legal_moves,
+        Board, BoardError, BoardStatus, Color, D4, D5, E4, E5, LegalMoves, Move, MoveError,
+        apply_forced_pass, apply_move, apply_move_unchecked, board_status, flips_for_move,
+        generate_legal_moves,
     };
 
     // 1 マス分のビットを作る簡易ヘルパー。
@@ -450,6 +504,24 @@ mod tests {
         moves
     }
 
+    // 黒番が強制パスになる固定局面を返す。
+    fn forced_pass_board() -> Board {
+        Board {
+            black_bits: !bit(square(0, 0)) & !bit(square(7, 0)),
+            white_bits: bit(square(7, 0)),
+            side_to_move: Color::Black,
+        }
+    }
+
+    // 両者とも合法手が存在しない固定局面を返す。
+    fn terminal_board() -> Board {
+        Board {
+            black_bits: u64::MAX,
+            white_bits: 0,
+            side_to_move: Color::Black,
+        }
+    }
+
     #[test]
     fn color_represents_black_and_white() {
         // 色の列挙型が黒と白の 2 値を正しく区別できることを確認する。
@@ -553,6 +625,14 @@ mod tests {
         // MoveError が非合法手を表現できることを確認する。
         assert_eq!(MoveError::IllegalMove, MoveError::IllegalMove);
         assert_ne!(MoveError::IllegalMove, MoveError::PassNotAllowed);
+    }
+
+    #[test]
+    fn board_status_represents_all_game_states() {
+        // BoardStatus が継続、強制パス、終局の 3 状態を区別できることを確認する。
+        assert_eq!(BoardStatus::Ongoing, BoardStatus::Ongoing);
+        assert_eq!(BoardStatus::ForcedPass, BoardStatus::ForcedPass);
+        assert_eq!(BoardStatus::Terminal, BoardStatus::Terminal);
     }
 
     #[test]
@@ -838,6 +918,69 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn board_status_returns_ongoing_when_current_side_has_legal_moves() {
+        // 合法手が存在する局面を Ongoing と判定することを確認する。
+        assert_eq!(board_status(&Board::new_initial()), BoardStatus::Ongoing);
+    }
+
+    #[test]
+    fn board_status_returns_forced_pass_when_only_opponent_can_move() {
+        // 現手番は打てず相手番のみ打てる局面を ForcedPass と判定することを確認する。
+        let board = forced_pass_board();
+        let opponent_board = Board {
+            side_to_move: Color::White,
+            ..board
+        };
+
+        assert_eq!(generate_legal_moves(&board).count, 0);
+        assert!(generate_legal_moves(&opponent_board).count > 0);
+        assert_eq!(board_status(&board), BoardStatus::ForcedPass);
+    }
+
+    #[test]
+    fn board_status_returns_terminal_when_neither_side_can_move() {
+        // 両者とも合法手がない局面を Terminal と判定することを確認する。
+        let board = terminal_board();
+        let opponent_board = Board {
+            side_to_move: Color::White,
+            ..board
+        };
+
+        assert_eq!(generate_legal_moves(&board).count, 0);
+        assert_eq!(generate_legal_moves(&opponent_board).count, 0);
+        assert_eq!(board_status(&board), BoardStatus::Terminal);
+    }
+
+    #[test]
+    fn apply_forced_pass_flips_side_without_changing_discs() {
+        // 強制パスでは石配置を変えずに手番だけ反転することを確認する。
+        let board = forced_pass_board();
+        let passed = apply_forced_pass(&board).unwrap();
+
+        assert_eq!(passed.black_bits, board.black_bits);
+        assert_eq!(passed.white_bits, board.white_bits);
+        assert_eq!(passed.side_to_move, Color::White);
+    }
+
+    #[test]
+    fn apply_forced_pass_rejects_position_with_legal_moves() {
+        // 合法手がある局面では強制パスできないことを確認する。
+        assert_eq!(
+            apply_forced_pass(&Board::new_initial()),
+            Err(MoveError::PassNotAllowed)
+        );
+    }
+
+    #[test]
+    fn apply_forced_pass_rejects_terminal_board() {
+        // 終局局面では強制パスではなく TerminalBoard エラーを返すことを確認する。
+        assert_eq!(
+            apply_forced_pass(&terminal_board()),
+            Err(MoveError::TerminalBoard)
+        );
     }
 
     #[test]
