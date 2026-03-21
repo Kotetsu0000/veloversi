@@ -56,6 +56,31 @@ pub enum MoveError {
     TerminalBoard,
 }
 
+// Perft の実行時に起こりうる失敗理由を表す。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PerftError {
+    InvalidMode,
+}
+
+// Perft におけるパスの数え方を表す内部モード。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PerftMode {
+    Mode1,
+    Mode2,
+}
+
+impl TryFrom<u8> for PerftMode {
+    type Error = PerftError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::Mode1),
+            2 => Ok(Self::Mode2),
+            _ => Err(PerftError::InvalidMode),
+        }
+    }
+}
+
 impl Board {
     // 標準的な初期局面を返す。
     pub fn new_initial() -> Self {
@@ -239,6 +264,45 @@ pub fn board_status(board: &Board) -> BoardStatus {
     }
 }
 
+// Perft の再帰本体をモード差だけ切り替えながら実行する。
+fn perft_with_mode(board: &Board, depth: u8, mode: PerftMode) -> u64 {
+    if depth == 0 {
+        return 1;
+    }
+
+    let legal = generate_legal_moves(board);
+    if legal.count > 0 {
+        let mut bitmask = legal.bitmask;
+        let mut nodes = 0u64;
+
+        while bitmask != 0 {
+            let square = bitmask.trailing_zeros() as u8;
+            let next_board = apply_move_unchecked(board, Move { square });
+            nodes += perft_with_mode(&next_board, depth - 1, mode);
+            bitmask &= bitmask - 1;
+        }
+
+        return nodes;
+    }
+
+    match board_status(board) {
+        BoardStatus::ForcedPass => {
+            let next_board = apply_forced_pass(board).expect("forced pass must be applicable");
+            match mode {
+                PerftMode::Mode1 => perft_with_mode(&next_board, depth - 1, mode),
+                PerftMode::Mode2 => perft_with_mode(&next_board, depth, mode),
+            }
+        }
+        BoardStatus::Terminal => 1,
+        BoardStatus::Ongoing => unreachable!("legal moves exist for ongoing board"),
+    }
+}
+
+// モード差を切り替えながら Perft の葉数を返す。
+pub fn perft(board: &Board, depth: u8, mode: u8) -> Result<u64, PerftError> {
+    Ok(perft_with_mode(board, depth, PerftMode::try_from(mode)?))
+}
+
 // ビットボード演算で現在手番の合法手を列挙する。
 pub fn generate_legal_moves(board: &Board) -> LegalMoves {
     let (player_bits, opponent_bits) = player_and_opponent_bits(board);
@@ -321,8 +385,8 @@ fn _core(_py: Python<'_>, _module: &Bound<'_, PyModule>) -> PyResult<()> {
 mod tests {
     use super::{
         Board, BoardError, BoardStatus, Color, D4, D5, E4, E5, LegalMoves, Move, MoveError,
-        apply_forced_pass, apply_move, apply_move_unchecked, board_status, flips_for_move,
-        generate_legal_moves,
+        PerftError, apply_forced_pass, apply_move, apply_move_unchecked, board_status,
+        flips_for_move, generate_legal_moves, perft,
     };
 
     // 1 マス分のビットを作る簡易ヘルパー。
@@ -522,6 +586,42 @@ mod tests {
         }
     }
 
+    // Perft の mode 差が深さ 1 で出る固定強制パス局面を返す。
+    fn perft_forced_pass_difference_board() -> Board {
+        Board {
+            black_bits: 216_316_972_774_802_026,
+            white_bits: 7_503_032_164_117_119_233,
+            side_to_move: Color::Black,
+        }
+    }
+
+    // ignored テストでルート手ごとの進捗を表示しながら Perft を確認する。
+    fn assert_perft_long_with_progress(depth: u8, mode: u8, expected: u64) {
+        let board = Board::new_initial();
+        let legal = generate_legal_moves(&board);
+        let moves = legal_move_list(legal);
+        let mut total = 0u64;
+
+        println!("perft mode={} depth={}", mode, depth);
+        println!("root moves: {}", moves.len());
+
+        for (index, mv) in moves.iter().enumerate() {
+            let next = apply_move_unchecked(&board, *mv);
+            let child = perft(&next, depth - 1, mode).unwrap();
+            total += child;
+            println!(
+                "[{}/{}] square={} nodes={}",
+                index + 1,
+                moves.len(),
+                mv.square,
+                child
+            );
+        }
+
+        println!("total={}", total);
+        assert_eq!(total, expected);
+    }
+
     #[test]
     fn color_represents_black_and_white() {
         // 色の列挙型が黒と白の 2 値を正しく区別できることを確認する。
@@ -625,6 +725,15 @@ mod tests {
         // MoveError が非合法手を表現できることを確認する。
         assert_eq!(MoveError::IllegalMove, MoveError::IllegalMove);
         assert_ne!(MoveError::IllegalMove, MoveError::PassNotAllowed);
+    }
+
+    #[test]
+    fn perft_error_rejects_invalid_mode() {
+        // PerftError が不正なモード指定を拒否できることを確認する。
+        assert_eq!(
+            perft(&Board::new_initial(), 1, 3),
+            Err(PerftError::InvalidMode)
+        );
     }
 
     #[test]
@@ -981,6 +1090,97 @@ mod tests {
             apply_forced_pass(&terminal_board()),
             Err(MoveError::TerminalBoard)
         );
+    }
+
+    #[test]
+    fn perft_returns_one_at_depth_zero_for_both_modes() {
+        // 深さ 0 ではモードに関わらず葉 1 を返すことを確認する。
+        let board = Board::new_initial();
+
+        assert_eq!(perft(&board, 0, 1), Ok(1));
+        assert_eq!(perft(&board, 0, 2), Ok(1));
+    }
+
+    #[test]
+    fn perft_matches_known_values_to_depth_eight_for_mode_one() {
+        // 初期局面の既知値に mode 1 が一致することを確認する。
+        let board = Board::new_initial();
+        let expected = [1_u64, 4, 12, 56, 244, 1396, 8200, 55092, 390216];
+
+        for (depth, expected_nodes) in expected.iter().enumerate() {
+            assert_eq!(perft(&board, depth as u8, 1), Ok(*expected_nodes));
+        }
+    }
+
+    #[test]
+    fn perft_matches_known_values_to_depth_eight_for_mode_two() {
+        // 初期局面の既知値に mode 2 が一致することを確認する。
+        let board = Board::new_initial();
+        let expected = [1_u64, 4, 12, 56, 244, 1396, 8200, 55092, 390216];
+
+        for (depth, expected_nodes) in expected.iter().enumerate() {
+            assert_eq!(perft(&board, depth as u8, 2), Ok(*expected_nodes));
+        }
+    }
+
+    #[test]
+    fn perft_counts_forced_pass_differently_by_mode() {
+        // 強制パスを含む局面で mode 1 と mode 2 の深さ消費差が出ることを確認する。
+        let board = perft_forced_pass_difference_board();
+
+        assert_eq!(board_status(&board), BoardStatus::ForcedPass);
+        assert_eq!(perft(&board, 1, 1), Ok(1));
+        assert_eq!(perft(&board, 1, 2), Ok(5));
+        assert_ne!(perft(&board, 1, 1), perft(&board, 1, 2));
+    }
+
+    #[test]
+    fn perft_returns_one_for_terminal_board_regardless_of_depth_or_mode() {
+        // 終局局面では深さとモードに関わらず葉 1 を返すことを確認する。
+        let board = terminal_board();
+
+        assert_eq!(perft(&board, 1, 1), Ok(1));
+        assert_eq!(perft(&board, 1, 2), Ok(1));
+        assert_eq!(perft(&board, 8, 1), Ok(1));
+        assert_eq!(perft(&board, 8, 2), Ok(1));
+    }
+
+    #[test]
+    #[ignore = "long-running perft verification"]
+    fn perft_long_initial_position_mode_one_to_depth_fifteen() {
+        // 初期局面の mode 1 既知値を深さ 9 から 15 まで確認する。
+        let expected = [
+            (9_u8, 3005288_u64),
+            (10, 24571284),
+            (11, 212258800),
+            (12, 1939886636),
+            (13, 18429641748),
+            (14, 184042084512),
+            (15, 1891832540064),
+        ];
+
+        for (depth, expected_nodes) in expected {
+            assert_perft_long_with_progress(depth, 1, expected_nodes);
+        }
+    }
+
+    #[test]
+    #[ignore = "long-running perft verification"]
+    fn perft_long_initial_position_mode_two_to_depth_fifteen() {
+        // 初期局面の mode 2 既知値を深さ 9 から 15 まで確認する。
+        let expected = [
+            (9_u8, 3005320_u64),
+            (10, 24571420),
+            (11, 212260880),
+            (12, 1939899208),
+            (13, 18429791868),
+            (14, 184043158384),
+            (15, 1891845643044),
+        ];
+
+        for (depth, expected_nodes) in expected {
+            assert_perft_long_with_progress(depth, 2, expected_nodes);
+        }
     }
 
     #[test]

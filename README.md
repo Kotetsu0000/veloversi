@@ -28,9 +28,10 @@ make check
 make mutants
 make coverage
 make coverage-check
+make perft-long
 ```
 
-`make check` は常設 CI 用です。`make mutants`、`make coverage`、`make coverage-check` は手動実行用で、`push` / `pull_request` の CI には含めません。
+`make check` は常設 CI 用です。`make mutants`、`make coverage`、`make coverage-check`、`make perft-long` は手動実行用で、`push` / `pull_request` の CI には含めません。
 
 個別に実行する場合:
 
@@ -45,7 +46,11 @@ uv run basedpyright
 cargo mutants --file src/lib.rs
 cargo llvm-cov --html
 cargo llvm-cov --fail-under-lines 80
+cargo test perft_long_initial_position_mode_one_to_depth_fifteen -- --ignored --nocapture
+cargo test perft_long_initial_position_mode_two_to_depth_fifteen -- --ignored --nocapture
 ```
+
+`make perft-long` は初期局面の Perft 既知値を深さ 9 から 15 まで確認する長時間検証用コマンドです。ルートの合法手単位で進捗を表示します。
 
 ## Python 拡張モジュールのビルド
 

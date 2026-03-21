@@ -1,4 +1,4 @@
-.PHONY: build-ext test lint format check mutants coverage coverage-check
+.PHONY: build-ext test lint format check mutants coverage coverage-check perft-long
 
 build-ext:
 	uv run maturin develop
@@ -26,3 +26,7 @@ coverage:
 
 coverage-check:
 	cargo llvm-cov --fail-under-lines 85
+
+perft-long:
+	cargo test perft_long_initial_position_mode_one_to_depth_fifteen -- --ignored --nocapture
+	cargo test perft_long_initial_position_mode_two_to_depth_fifteen -- --ignored --nocapture

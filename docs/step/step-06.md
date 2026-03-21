@@ -23,29 +23,29 @@
 
 ## 受け入れ条件
 
-- [ ] `perft(board, depth, mode=1)` が深さ 0 で 1 を返すことを確認するテストが成功する
-- [ ] `perft(board, depth, mode=2)` が深さ 0 で 1 を返すことを確認するテストが成功する
-- [ ] `perft(board, depth, mode=1)` が初期局面の深さ 1 = 4 を返すことを確認するテストが成功する
-- [ ] `perft(board, depth, mode=1)` が初期局面の深さ 2 = 12 を返すことを確認するテストが成功する
-- [ ] `perft(board, depth, mode=1)` が初期局面の深さ 3 = 56 を返すことを確認するテストが成功する
-- [ ] `perft(board, depth, mode=1)` が初期局面の深さ 4 = 244 を返すことを確認するテストが成功する
-- [ ] `perft(board, depth, mode=1)` が初期局面の深さ 5 = 1396 を返すことを確認するテストが成功する
-- [ ] `perft(board, depth, mode=1)` が初期局面の深さ 6 = 8200 を返すことを確認するテストが成功する
-- [ ] `perft(board, depth, mode=1)` が初期局面の深さ 7 = 55092 を返すことを確認するテストが成功する
-- [ ] `perft(board, depth, mode=1)` が初期局面の深さ 8 = 390216 を返すことを確認するテストが成功する
-- [ ] `perft(board, depth, mode=2)` が初期局面の深さ 1 = 4 を返すことを確認するテストが成功する
-- [ ] `perft(board, depth, mode=2)` が初期局面の深さ 2 = 12 を返すことを確認するテストが成功する
-- [ ] `perft(board, depth, mode=2)` が初期局面の深さ 3 = 56 を返すことを確認するテストが成功する
-- [ ] `perft(board, depth, mode=2)` が初期局面の深さ 4 = 244 を返すことを確認するテストが成功する
-- [ ] `perft(board, depth, mode=2)` が初期局面の深さ 5 = 1396 を返すことを確認するテストが成功する
-- [ ] `perft(board, depth, mode=2)` が初期局面の深さ 6 = 8200 を返すことを確認するテストが成功する
-- [ ] `perft(board, depth, mode=2)` が初期局面の深さ 7 = 55092 を返すことを確認するテストが成功する
-- [ ] `perft(board, depth, mode=2)` が初期局面の深さ 8 = 390216 を返すことを確認するテストが成功する
-- [ ] 強制パスを含む局面で `perft(board, depth, mode=1)` と `perft(board, depth, mode=2)` の差が確認できるテストが成功する
-- [ ] `Makefile` に深さ 15 までの長時間検証用コマンドが追加されている
-- [ ] `README.md` に深さ 15 までの手動確認手順が記載されている
+- [x] `perft(board, depth, mode=1)` が深さ 0 で 1 を返すことを確認するテストが成功する
+- [x] `perft(board, depth, mode=2)` が深さ 0 で 1 を返すことを確認するテストが成功する
+- [x] `perft(board, depth, mode=1)` が初期局面の深さ 1 = 4 を返すことを確認するテストが成功する
+- [x] `perft(board, depth, mode=1)` が初期局面の深さ 2 = 12 を返すことを確認するテストが成功する
+- [x] `perft(board, depth, mode=1)` が初期局面の深さ 3 = 56 を返すことを確認するテストが成功する
+- [x] `perft(board, depth, mode=1)` が初期局面の深さ 4 = 244 を返すことを確認するテストが成功する
+- [x] `perft(board, depth, mode=1)` が初期局面の深さ 5 = 1396 を返すことを確認するテストが成功する
+- [x] `perft(board, depth, mode=1)` が初期局面の深さ 6 = 8200 を返すことを確認するテストが成功する
+- [x] `perft(board, depth, mode=1)` が初期局面の深さ 7 = 55092 を返すことを確認するテストが成功する
+- [x] `perft(board, depth, mode=1)` が初期局面の深さ 8 = 390216 を返すことを確認するテストが成功する
+- [x] `perft(board, depth, mode=2)` が初期局面の深さ 1 = 4 を返すことを確認するテストが成功する
+- [x] `perft(board, depth, mode=2)` が初期局面の深さ 2 = 12 を返すことを確認するテストが成功する
+- [x] `perft(board, depth, mode=2)` が初期局面の深さ 3 = 56 を返すことを確認するテストが成功する
+- [x] `perft(board, depth, mode=2)` が初期局面の深さ 4 = 244 を返すことを確認するテストが成功する
+- [x] `perft(board, depth, mode=2)` が初期局面の深さ 5 = 1396 を返すことを確認するテストが成功する
+- [x] `perft(board, depth, mode=2)` が初期局面の深さ 6 = 8200 を返すことを確認するテストが成功する
+- [x] `perft(board, depth, mode=2)` が初期局面の深さ 7 = 55092 を返すことを確認するテストが成功する
+- [x] `perft(board, depth, mode=2)` が初期局面の深さ 8 = 390216 を返すことを確認するテストが成功する
+- [x] 強制パスを含む局面で `perft(board, depth, mode=1)` と `perft(board, depth, mode=2)` の差が確認できるテストが成功する
+- [x] `Makefile` に深さ 15 までの長時間検証用コマンドが追加されている
+- [x] `README.md` に深さ 15 までの手動確認手順が記載されている
 - [ ] `make perft-long` により、初期局面の深さ 9 から 15 までの既知値を確認できる
-- [ ] `cargo test` が成功する
+- [x] `cargo test` が成功する
 
 ## 実装開始時点の不足
 
