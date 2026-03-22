@@ -1075,9 +1075,161 @@ pub fn generate_legal_moves(board: &Board) -> LegalMoves {
     }
 }
 
+#[pyclass(name = "Board")]
+#[derive(Clone, Copy)]
+struct PyBoard {
+    inner: Board,
+}
+
+fn color_to_py_str(color: Color) -> &'static str {
+    match color {
+        Color::Black => "black",
+        Color::White => "white",
+    }
+}
+
+fn py_str_to_color(value: &str) -> PyResult<Color> {
+    match value.to_ascii_lowercase().as_str() {
+        "black" => Ok(Color::Black),
+        "white" => Ok(Color::White),
+        _ => Err(pyo3::exceptions::PyValueError::new_err(
+            "side_to_move must be 'black' or 'white'",
+        )),
+    }
+}
+
+#[pymethods]
+impl PyBoard {
+    #[new]
+    fn py_new(black_bits: u64, white_bits: u64, side_to_move: &str) -> PyResult<Self> {
+        let color = py_str_to_color(side_to_move)?;
+        let inner = Board::from_bits(black_bits, white_bits, color)
+            .map_err(|_| pyo3::exceptions::PyValueError::new_err("invalid board bits"))?;
+        Ok(Self { inner })
+    }
+
+    #[staticmethod]
+    fn new_initial() -> Self {
+        Self {
+            inner: Board::new_initial(),
+        }
+    }
+
+    #[getter]
+    fn black_bits(&self) -> u64 {
+        self.inner.black_bits
+    }
+
+    #[getter]
+    fn white_bits(&self) -> u64 {
+        self.inner.white_bits
+    }
+
+    #[getter]
+    fn side_to_move(&self) -> &'static str {
+        color_to_py_str(self.inner.side_to_move)
+    }
+
+    #[allow(clippy::wrong_self_convention)]
+    fn to_bits(&self) -> (u64, u64, &'static str) {
+        (
+            self.inner.black_bits,
+            self.inner.white_bits,
+            color_to_py_str(self.inner.side_to_move),
+        )
+    }
+}
+
+#[pyfunction]
+fn initial_board() -> PyBoard {
+    PyBoard::new_initial()
+}
+
+#[pyfunction]
+fn board_from_bits(black_bits: u64, white_bits: u64, side_to_move: &str) -> PyResult<PyBoard> {
+    PyBoard::py_new(black_bits, white_bits, side_to_move)
+}
+
+#[pyfunction(name = "generate_legal_moves")]
+fn generate_legal_moves_py(board: &PyBoard) -> u64 {
+    generate_legal_moves(&board.inner).bitmask
+}
+
+#[pyfunction]
+fn generate_legal_moves_bits(
+    black_bits: u64,
+    white_bits: u64,
+    side_to_move: &str,
+) -> PyResult<u64> {
+    let color = py_str_to_color(side_to_move)?;
+    let board = Board::from_bits(black_bits, white_bits, color)
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("invalid board bits"))?;
+    Ok(generate_legal_moves(&board).bitmask)
+}
+
+#[pyfunction(name = "apply_move_unchecked")]
+fn apply_move_unchecked_py(board: &PyBoard, square: u8) -> PyBoard {
+    PyBoard {
+        inner: apply_move_unchecked(&board.inner, Move { square }),
+    }
+}
+
+#[pyfunction]
+fn apply_move_unchecked_bits(
+    black_bits: u64,
+    white_bits: u64,
+    side_to_move: &str,
+    square: u8,
+) -> PyResult<(u64, u64, &'static str)> {
+    let color = py_str_to_color(side_to_move)?;
+    let board = Board::from_bits(black_bits, white_bits, color)
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("invalid board bits"))?;
+    let next = apply_move_unchecked(&board, Move { square });
+    Ok((
+        next.black_bits,
+        next.white_bits,
+        color_to_py_str(next.side_to_move),
+    ))
+}
+
+#[pyfunction(name = "apply_move")]
+fn apply_move_py(board: &PyBoard, square: u8) -> PyResult<PyBoard> {
+    apply_move(&board.inner, Move { square })
+        .map(|inner| PyBoard { inner })
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(format!("{err:?}")))
+}
+
+#[pyfunction]
+fn apply_move_bits(
+    black_bits: u64,
+    white_bits: u64,
+    side_to_move: &str,
+    square: u8,
+) -> PyResult<(u64, u64, &'static str)> {
+    let color = py_str_to_color(side_to_move)?;
+    let board = Board::from_bits(black_bits, white_bits, color)
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("invalid board bits"))?;
+    let next = apply_move(&board, Move { square })
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(format!("{err:?}")))?;
+    Ok((
+        next.black_bits,
+        next.white_bits,
+        color_to_py_str(next.side_to_move),
+    ))
+}
+
 // Python 拡張モジュールのエントリポイント。
 #[pymodule]
-fn _core(_py: Python<'_>, _module: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _core(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<PyBoard>()?;
+    module.add_function(wrap_pyfunction!(initial_board, module)?)?;
+    module.add_function(wrap_pyfunction!(board_from_bits, module)?)?;
+    module.add_function(wrap_pyfunction!(generate_legal_moves_py, module)?)?;
+    module.add_function(wrap_pyfunction!(generate_legal_moves_bits, module)?)?;
+    module.add_function(wrap_pyfunction!(apply_move_unchecked_py, module)?)?;
+    module.add_function(wrap_pyfunction!(apply_move_unchecked_bits, module)?)?;
+    module.add_function(wrap_pyfunction!(apply_move_py, module)?)?;
+    module.add_function(wrap_pyfunction!(apply_move_bits, module)?)?;
     Ok(())
 }
 
@@ -2648,6 +2800,59 @@ mod tests {
         print_simd_status();
         assert_perft_long_with_progress(12, 1, 1_939_886_636);
         assert_perft_long_with_progress(13, 1, 18_429_641_748);
+    }
+
+    #[test]
+    #[ignore = "api benchmark helper"]
+    fn api_bench_generate_legal_moves_initial_position() {
+        print_simd_status();
+        let board = Board::new_initial();
+        let start = std::time::Instant::now();
+        let mut checksum = 0u64;
+        for _ in 0..5_000_000 {
+            checksum ^= generate_legal_moves(&board).bitmask;
+        }
+        println!(
+            "rust generate_legal_moves elapsed={:.6}s checksum={}",
+            start.elapsed().as_secs_f64(),
+            checksum
+        );
+    }
+
+    #[test]
+    #[ignore = "api benchmark helper"]
+    fn api_bench_apply_move_unchecked_initial_position() {
+        print_simd_status();
+        let board = Board::new_initial();
+        let mv = Move { square: 19 };
+        let start = std::time::Instant::now();
+        let mut checksum = 0u64;
+        for _ in 0..5_000_000 {
+            checksum ^= apply_move_unchecked(&board, mv).black_bits;
+        }
+        println!(
+            "rust apply_move_unchecked elapsed={:.6}s checksum={}",
+            start.elapsed().as_secs_f64(),
+            checksum
+        );
+    }
+
+    #[test]
+    #[ignore = "api benchmark helper"]
+    fn api_bench_apply_move_initial_position() {
+        print_simd_status();
+        let board = Board::new_initial();
+        let mv = Move { square: 19 };
+        let start = std::time::Instant::now();
+        let mut checksum = 0u64;
+        for _ in 0..5_000_000 {
+            checksum ^= apply_move(&board, mv).unwrap().white_bits;
+        }
+        println!(
+            "rust apply_move elapsed={:.6}s checksum={}",
+            start.elapsed().as_secs_f64(),
+            checksum
+        );
     }
 
     #[test]

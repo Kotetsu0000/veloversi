@@ -29,6 +29,10 @@ make mutants
 make coverage
 make coverage-check
 make perft-long
+make api-bench-rust-legal
+make api-bench-rust-apply-unchecked
+make api-bench-rust-apply
+make api-bench-python
 ```
 
 `make check` は常設 CI 用です。`make mutants`、`make coverage`、`make coverage-check`、`make perft-long` は手動実行用で、`push` / `pull_request` の CI には含めません。
@@ -74,6 +78,18 @@ SIMD 経路は `VELOVERSI_SIMD` で比較用に強制できます。
 - `make perft-bench-generic`
 - `make perft-bench-sse2`
 - `make perft-bench-avx2`
+
+Python ライブラリとしての実使用速度を確認するには次のコマンドを使います。
+
+- `make api-bench-rust-legal`
+- `make api-bench-rust-apply-unchecked`
+- `make api-bench-rust-apply`
+- `make api-bench-python`
+
+Rust 側ベンチは初期局面の単発 API を大量反復し、Python 側ベンチは同じワークロードを PyO3 経由で測ります。
+Python 側では `Board` を受け取る object API と、`black_bits / white_bits / side_to_move` を直接渡す bits helper API を比較できます。
+通常利用では可読性と扱いやすさの点から `Board` ベース API を既定の利用形態とし、bits helper API は分解済み局面データを既に持っている呼び出し元向けの補助 API とします。
+どちらが速いかは API と呼び出し条件で変わりうるため、ホットパスで使う場合は `make api-bench-python` で手元の条件を再計測してください。
 
 配布用の `whl` でも、バイナリ全体を特定 CPU 向けに固定せず、実行時に CPU 機能を見て適切な経路を選ぶ構成にしています。
 
