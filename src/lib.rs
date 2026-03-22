@@ -6,8 +6,9 @@ use pyo3::prelude::*;
 use std::arch::x86_64::{
     __m128i, __m256i, _mm_cvtsi64_si128, _mm_cvtsi128_si64, _mm_or_si128, _mm_set_epi64x,
     _mm_set1_epi64x, _mm_shuffle_epi32, _mm_unpackhi_epi64, _mm_xor_si128, _mm256_add_epi64,
-    _mm256_and_si256, _mm256_broadcastq_epi64, _mm256_castsi256_si128, _mm256_extracti128_si256,
-    _mm256_or_si256, _mm256_set_epi64x, _mm256_sllv_epi64, _mm256_srlv_epi64,
+    _mm256_and_si256, _mm256_andnot_si256, _mm256_broadcastq_epi64, _mm256_castsi256_si128,
+    _mm256_cmpeq_epi64, _mm256_extracti128_si256, _mm256_or_si256, _mm256_set_epi64x,
+    _mm256_setzero_si256, _mm256_sllv_epi64, _mm256_srlv_epi64, _mm256_sub_epi64,
 };
 use std::sync::OnceLock;
 
@@ -90,42 +91,82 @@ enum SimdPreference {
 }
 
 static SIMD_PREFERENCE: OnceLock<SimdPreference> = OnceLock::new();
+#[cfg(target_arch = "x86_64")]
+static FLIP_MASKS: OnceLock<[FlipMasks; 64]> = OnceLock::new();
+
+fn parse_simd_preference(raw: Option<&str>) -> SimdPreference {
+    match raw.map(str::to_ascii_lowercase).as_deref() {
+        Some("generic") => SimdPreference::Generic,
+        Some("sse2") => SimdPreference::Sse2,
+        Some("avx2") => SimdPreference::Avx2,
+        _ => SimdPreference::Auto,
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn resolve_movegen_backend(preference: SimdPreference, has_avx2: bool) -> &'static str {
+    match preference {
+        SimdPreference::Generic | SimdPreference::Sse2 => "generic",
+        SimdPreference::Avx2 => {
+            assert!(
+                has_avx2,
+                "VELOVERSI_SIMD=avx2 が指定されましたが、この CPU は avx2 非対応です"
+            );
+            "avx2"
+        }
+        SimdPreference::Auto => {
+            if has_avx2 {
+                "avx2"
+            } else {
+                "generic"
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn resolve_board_backend(preference: SimdPreference) -> &'static str {
+    match preference {
+        SimdPreference::Generic => "generic",
+        SimdPreference::Sse2 | SimdPreference::Avx2 | SimdPreference::Auto => "sse2",
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn resolve_flip_backend(preference: SimdPreference, has_avx2: bool) -> &'static str {
+    match preference {
+        SimdPreference::Generic | SimdPreference::Sse2 => "generic",
+        SimdPreference::Avx2 => {
+            assert!(
+                has_avx2,
+                "VELOVERSI_SIMD=avx2 が指定されましたが、この CPU は avx2 非対応です"
+            );
+            "avx2"
+        }
+        SimdPreference::Auto => {
+            if has_avx2 {
+                "avx2"
+            } else {
+                "generic"
+            }
+        }
+    }
+}
 
 // 環境変数から SIMD 経路の強制指定を読み取る。
 fn simd_preference() -> SimdPreference {
-    *SIMD_PREFERENCE.get_or_init(|| match std::env::var("VELOVERSI_SIMD") {
-        Ok(value) => match value.to_ascii_lowercase().as_str() {
-            "generic" => SimdPreference::Generic,
-            "sse2" => SimdPreference::Sse2,
-            "avx2" => SimdPreference::Avx2,
-            _ => SimdPreference::Auto,
-        },
-        Err(_) => SimdPreference::Auto,
-    })
+    *SIMD_PREFERENCE
+        .get_or_init(|| parse_simd_preference(std::env::var("VELOVERSI_SIMD").ok().as_deref()))
 }
 
 // 合法手生成で使う実装経路名を返す。
 fn selected_movegen_backend() -> &'static str {
     #[cfg(target_arch = "x86_64")]
     {
-        match simd_preference() {
-            SimdPreference::Generic => "generic",
-            SimdPreference::Sse2 => "generic",
-            SimdPreference::Avx2 => {
-                assert!(
-                    std::arch::is_x86_feature_detected!("avx2"),
-                    "VELOVERSI_SIMD=avx2 が指定されましたが、この CPU は avx2 非対応です"
-                );
-                "avx2"
-            }
-            SimdPreference::Auto => {
-                if std::arch::is_x86_feature_detected!("avx2") {
-                    "avx2"
-                } else {
-                    "generic"
-                }
-            }
-        }
+        resolve_movegen_backend(
+            simd_preference(),
+            std::arch::is_x86_feature_detected!("avx2"),
+        )
     }
 
     #[cfg(not(target_arch = "x86_64"))]
@@ -138,10 +179,23 @@ fn selected_movegen_backend() -> &'static str {
 fn selected_board_backend() -> &'static str {
     #[cfg(target_arch = "x86_64")]
     {
-        match simd_preference() {
-            SimdPreference::Generic => "generic",
-            SimdPreference::Sse2 | SimdPreference::Avx2 | SimdPreference::Auto => "sse2",
-        }
+        resolve_board_backend(simd_preference())
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        "generic"
+    }
+}
+
+// 反転計算で使う実装経路名を返す。
+fn selected_flip_backend() -> &'static str {
+    #[cfg(target_arch = "x86_64")]
+    {
+        resolve_flip_backend(
+            simd_preference(),
+            std::arch::is_x86_feature_detected!("avx2"),
+        )
     }
 
     #[cfg(not(target_arch = "x86_64"))]
@@ -239,6 +293,13 @@ struct Flip {
     pos: u8,
     move_bit: u64,
     flip: u64,
+}
+
+#[cfg(target_arch = "x86_64")]
+#[derive(Clone, Copy, Debug, Default)]
+struct FlipMasks {
+    left: [u64; 4],
+    right: [u64; 4],
 }
 
 // 手番視点の player / opponent を保持する内部盤面表現。
@@ -555,6 +616,45 @@ fn read_h2vline(offset_u32: usize) -> u64 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+fn init_flip_masks() -> [FlipMasks; 64] {
+    let mut masks = [FlipMasks::default(); 64];
+
+    for x in 0..8 {
+        let mut left = [
+            (0x0102040810204080_u64 >> ((7 - x) * 8)) & 0xffff_ffff_ffff_ff00,
+            (0x8040201008040201_u64 >> (x * 8)) & 0xffff_ffff_ffff_ff00,
+            (0x0101010101010101_u64 << x) & 0xffff_ffff_ffff_ff00,
+            ((0xfe_u64 << x) & 0xff),
+        ];
+        let mut right = [
+            (0x0102040810204080_u64 << (x * 8)) & 0x00ff_ffff_ffff_ffff,
+            (0x8040201008040201_u64 << ((7 - x) * 8)) & 0x00ff_ffff_ffff_ffff,
+            (0x0101010101010101_u64 << x) & 0x00ff_ffff_ffff_ffff,
+            (u64::from(0x7f_u8 >> (7 - x))) << 56,
+        ];
+
+        for y in 0..8 {
+            masks[y * 8 + x].left = left;
+            masks[(7 - y) * 8 + x].right = right;
+
+            for lane in &mut left {
+                *lane <<= 8;
+            }
+            for lane in &mut right {
+                *lane >>= 8;
+            }
+        }
+    }
+
+    masks
+}
+
+#[cfg(target_arch = "x86_64")]
+fn flip_masks(square: u8) -> &'static FlipMasks {
+    &FLIP_MASKS.get_or_init(init_flip_masks)[square as usize]
+}
+
 // 斜め方向 1 本分の反転ビットを table から求める。
 #[inline(always)]
 fn diagonal_flip(line_mask: u64, player_bits: u64, opponent_bits: u64, x: usize) -> u64 {
@@ -581,6 +681,18 @@ fn flips_for_move_bits(player_bits: u64, opponent_bits: u64, square: u8) -> u64 
 // 合法手であることが分かっているマスの反転ビットを返す。
 #[inline(always)]
 fn flips_for_move_bits_unchecked(player_bits: u64, opponent_bits: u64, square: u8) -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if selected_flip_backend() == "avx2" {
+            return unsafe { flips_for_move_bits_avx2(player_bits, opponent_bits, square) };
+        }
+    }
+
+    flips_for_move_bits_unchecked_generic(player_bits, opponent_bits, square)
+}
+
+#[inline(always)]
+fn flips_for_move_bits_unchecked_generic(player_bits: u64, opponent_bits: u64, square: u8) -> u64 {
     let square = square as usize;
     let x = square & 7;
     let y = square >> 3;
@@ -601,6 +713,51 @@ fn flips_for_move_bits_unchecked(player_bits: u64, opponent_bits: u64, square: u
     flip |= diagonal_flip(BB_DLINE57[square], player_bits, opponent_bits, x);
 
     flip
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn flips_for_move_bits_avx2(player_bits: u64, opponent_bits: u64, square: u8) -> u64 {
+    let shifts = _mm256_set_epi64x(7, 9, 8, 1);
+    let shifts2 = _mm256_set_epi64x(14, 18, 16, 2);
+    let shifts4 = _mm256_set_epi64x(28, 36, 32, 4);
+    let zero = _mm256_setzero_si256();
+    let mask = flip_masks(square);
+    let player = _mm256_broadcastq_epi64(_mm_cvtsi64_si128(player_bits as i64));
+    let opponent = _mm256_broadcastq_epi64(_mm_cvtsi64_si128(opponent_bits as i64));
+
+    let right_mask = _mm256_set_epi64x(
+        mask.right[0] as i64,
+        mask.right[1] as i64,
+        mask.right[2] as i64,
+        mask.right[3] as i64,
+    );
+    let mut eraser = _mm256_andnot_si256(opponent, right_mask);
+    let mut right = _mm256_sllv_epi64(_mm256_and_si256(player, right_mask), shifts);
+    eraser = _mm256_or_si256(eraser, _mm256_srlv_epi64(eraser, shifts));
+    right = _mm256_andnot_si256(eraser, right);
+    right = _mm256_andnot_si256(_mm256_srlv_epi64(eraser, shifts2), right);
+    right = _mm256_andnot_si256(_mm256_srlv_epi64(eraser, shifts4), right);
+    let mut flips = _mm256_and_si256(right_mask, _mm256_sub_epi64(zero, right));
+
+    let left_mask = _mm256_set_epi64x(
+        mask.left[0] as i64,
+        mask.left[1] as i64,
+        mask.left[2] as i64,
+        mask.left[3] as i64,
+    );
+    let mut left = _mm256_andnot_si256(opponent, left_mask);
+    left = _mm256_and_si256(left, _mm256_sub_epi64(zero, left));
+    left = _mm256_and_si256(left, player);
+    let left_fill = _mm256_sub_epi64(_mm256_cmpeq_epi64(left, zero), left);
+    flips = _mm256_or_si256(flips, _mm256_andnot_si256(left_fill, left_mask));
+
+    let halves = _mm_or_si128(
+        _mm256_castsi256_si128(flips),
+        _mm256_extracti128_si256(flips, 1),
+    );
+    let merged = _mm_or_si128(halves, _mm_shuffle_epi32(halves, 0x4e));
+    _mm_cvtsi128_si64(merged) as u64
 }
 
 // 旧来の 8 方向走査版をテスト用の比較基準として残す。
@@ -845,10 +1002,11 @@ fn _core(_py: Python<'_>, _module: &Bound<'_, PyModule>) -> PyResult<()> {
 mod tests {
     use super::{
         BB_H2VLINE, BB_SEED, Board, BoardError, BoardStatus, Color, D4, D5, E4, E5, LegalMoves,
-        Move, MoveError, OrientedBoard, PerftError, PerftMode, apply_forced_pass, apply_move,
-        apply_move_unchecked, board_status, board_with_side_to_move, flips_for_move,
-        flips_for_move_bits_scan, generate_legal_moves, horizontal_seed, perft,
-        perft_with_mode_oriented, read_h2vline,
+        Move, MoveError, OrientedBoard, PerftError, PerftMode, SimdPreference, apply_forced_pass,
+        apply_move, apply_move_unchecked, board_status, board_with_side_to_move, flips_for_move,
+        flips_for_move_bits_scan, generate_legal_moves, horizontal_seed,
+        legal_moves_bitmask_generic, parse_simd_preference, perft, perft_with_mode_oriented,
+        read_h2vline, selected_flip_backend,
     };
     use rayon::prelude::*;
 
@@ -1278,7 +1436,153 @@ mod tests {
     fn print_simd_status() {
         println!("VELOVERSI_SIMD={:?}", crate::simd_preference());
         println!("movegen backend={}", crate::selected_movegen_backend());
+        println!("flip backend={}", crate::selected_flip_backend());
         println!("board backend={}", crate::selected_board_backend());
+    }
+
+    #[test]
+    fn parse_simd_preference_maps_known_and_unknown_values() {
+        assert_eq!(parse_simd_preference(None), SimdPreference::Auto);
+        assert_eq!(
+            parse_simd_preference(Some("generic")),
+            SimdPreference::Generic
+        );
+        assert_eq!(parse_simd_preference(Some("sse2")), SimdPreference::Sse2);
+        assert_eq!(parse_simd_preference(Some("avx2")), SimdPreference::Avx2);
+        assert_eq!(parse_simd_preference(Some("AUTO")), SimdPreference::Auto);
+        assert_eq!(parse_simd_preference(Some("unknown")), SimdPreference::Auto);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn resolve_backend_selection_matches_documented_matrix() {
+        assert_eq!(
+            crate::resolve_movegen_backend(SimdPreference::Generic, false),
+            "generic"
+        );
+        assert_eq!(
+            crate::resolve_movegen_backend(SimdPreference::Sse2, false),
+            "generic"
+        );
+        assert_eq!(
+            crate::resolve_movegen_backend(SimdPreference::Auto, false),
+            "generic"
+        );
+        assert_eq!(
+            crate::resolve_movegen_backend(SimdPreference::Auto, true),
+            "avx2"
+        );
+        assert_eq!(
+            crate::resolve_board_backend(SimdPreference::Generic),
+            "generic"
+        );
+        assert_eq!(crate::resolve_board_backend(SimdPreference::Sse2), "sse2");
+        assert_eq!(crate::resolve_board_backend(SimdPreference::Avx2), "sse2");
+        assert_eq!(crate::resolve_board_backend(SimdPreference::Auto), "sse2");
+        assert_eq!(
+            crate::resolve_flip_backend(SimdPreference::Generic, false),
+            "generic"
+        );
+        assert_eq!(
+            crate::resolve_flip_backend(SimdPreference::Sse2, false),
+            "generic"
+        );
+        assert_eq!(
+            crate::resolve_flip_backend(SimdPreference::Auto, false),
+            "generic"
+        );
+        assert_eq!(
+            crate::resolve_flip_backend(SimdPreference::Auto, true),
+            "avx2"
+        );
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn forcing_avx2_without_cpu_support_panics_in_backend_resolution() {
+        let movegen = std::panic::catch_unwind(|| {
+            crate::resolve_movegen_backend(SimdPreference::Avx2, false)
+        });
+        let flip =
+            std::panic::catch_unwind(|| crate::resolve_flip_backend(SimdPreference::Avx2, false));
+        assert!(movegen.is_err());
+        assert!(flip.is_err());
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn avx2_flip_matches_generic_oracle_for_curated_positions() {
+        if !std::arch::is_x86_feature_detected!("avx2") {
+            return;
+        }
+
+        let positions = [
+            Board::new_initial(),
+            Board {
+                black_bits: bit(square(3, 3)) | bit(square(4, 3)) | bit(square(3, 4)),
+                white_bits: bit(square(4, 4)),
+                side_to_move: Color::White,
+            },
+            Board {
+                black_bits: bit(square(0, 0))
+                    | bit(square(2, 0))
+                    | bit(square(0, 2))
+                    | bit(square(7, 7)),
+                white_bits: bit(square(1, 0)) | bit(square(0, 1)) | bit(square(6, 6)),
+                side_to_move: Color::Black,
+            },
+        ];
+
+        for board in positions {
+            for mv in legal_move_list(generate_legal_moves_naive(&board)) {
+                let (player_bits, opponent_bits) = match board.side_to_move {
+                    Color::Black => (board.black_bits, board.white_bits),
+                    Color::White => (board.white_bits, board.black_bits),
+                };
+
+                let generic = crate::flips_for_move_bits_unchecked_generic(
+                    player_bits,
+                    opponent_bits,
+                    mv.square,
+                );
+                let avx2 = unsafe {
+                    crate::flips_for_move_bits_avx2(player_bits, opponent_bits, mv.square)
+                };
+                assert_eq!(avx2, generic);
+            }
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn auto_or_forced_avx2_flip_backend_is_reported_consistently() {
+        if !std::arch::is_x86_feature_detected!("avx2") {
+            assert_eq!(selected_flip_backend(), "generic");
+            return;
+        }
+
+        let backend = selected_flip_backend();
+        assert!(backend == "generic" || backend == "avx2");
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn selected_backends_match_runtime_resolution() {
+        let preference = crate::simd_preference();
+        let has_avx2 = std::arch::is_x86_feature_detected!("avx2");
+
+        assert_eq!(
+            crate::selected_movegen_backend(),
+            crate::resolve_movegen_backend(preference, has_avx2)
+        );
+        assert_eq!(
+            crate::selected_board_backend(),
+            crate::resolve_board_backend(preference)
+        );
+        assert_eq!(
+            crate::selected_flip_backend(),
+            crate::resolve_flip_backend(preference, has_avx2)
+        );
     }
 
     #[test]
@@ -1493,6 +1797,76 @@ mod tests {
             for mv in legal_move_list(generate_legal_moves_naive(&board)) {
                 assert_flip_implementations_match(&board, mv);
             }
+        }
+    }
+
+    #[test]
+    fn generic_legal_moves_matches_naive_oracle_for_curated_positions() {
+        let positions = [
+            Board::new_initial(),
+            Board {
+                black_bits: bit(square(3, 3)) | bit(square(4, 3)) | bit(square(3, 4)),
+                white_bits: bit(square(4, 4)),
+                side_to_move: Color::White,
+            },
+            Board {
+                black_bits: bit(square(0, 0))
+                    | bit(square(2, 0))
+                    | bit(square(0, 2))
+                    | bit(square(7, 7)),
+                white_bits: bit(square(1, 0)) | bit(square(0, 1)) | bit(square(6, 6)),
+                side_to_move: Color::Black,
+            },
+        ];
+
+        for board in positions {
+            let (player_bits, opponent_bits) = match board.side_to_move {
+                Color::Black => (board.black_bits, board.white_bits),
+                Color::White => (board.white_bits, board.black_bits),
+            };
+            assert_eq!(
+                legal_moves_bitmask_generic(player_bits, opponent_bits),
+                generate_legal_moves_naive(&board).bitmask
+            );
+        }
+    }
+
+    #[test]
+    fn generic_legal_moves_matches_naive_oracle_for_deterministic_random_positions() {
+        let mut seed = 0x4c95_2a61_f18d_730b_u64;
+
+        for _ in 0..1_000 {
+            seed ^= seed << 7;
+            seed ^= seed >> 9;
+            let occupancy = seed;
+
+            seed ^= seed << 7;
+            seed ^= seed >> 9;
+            let black_bits = seed & occupancy;
+            let white_bits = occupancy & !black_bits;
+
+            seed ^= seed << 7;
+            seed ^= seed >> 9;
+            let side_to_move = if seed & 1 == 0 {
+                Color::Black
+            } else {
+                Color::White
+            };
+
+            let board = Board {
+                black_bits,
+                white_bits,
+                side_to_move,
+            };
+            let (player_bits, opponent_bits) = match board.side_to_move {
+                Color::Black => (board.black_bits, board.white_bits),
+                Color::White => (board.white_bits, board.black_bits),
+            };
+
+            assert_eq!(
+                legal_moves_bitmask_generic(player_bits, opponent_bits),
+                generate_legal_moves_naive(&board).bitmask
+            );
         }
     }
 

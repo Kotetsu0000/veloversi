@@ -1,5 +1,7 @@
 .PHONY: build-ext test lint format check mutants coverage coverage-check perft-long perft-bench-auto perft-bench-generic perft-bench-sse2 perft-bench-avx2
 
+PYTHON_PATHS := src $(wildcard tests)
+
 build-ext:
 	uv run maturin develop
 
@@ -9,12 +11,12 @@ test: build-ext
 
 lint:
 	cargo clippy --all-targets --all-features -- -D warnings
-	uv run ruff check src tests
+	uv run ruff check $(PYTHON_PATHS)
 	uv run basedpyright
 
 format:
 	cargo fmt --check
-	uv run ruff format --check src tests
+	uv run ruff format --check $(PYTHON_PATHS)
 
 check: format lint test
 

@@ -52,14 +52,21 @@ cargo test --release perft_long_initial_position_mode_two_to_depth_fifteen -- --
 
 `make perft-long` は初期局面の Perft 既知値を深さ 9 から 15 まで確認する長時間検証用コマンドです。`--release` で実行し、ルートの合法手単位で進捗を表示します。
 
-合法手生成には runtime dispatch を入れており、`x86_64` かつ `avx2` が利用可能な環境では AVX2 経路を使い、それ以外の環境では generic 実装へ自動でフォールバックします。盤面更新は `x86_64` では既定で SSE2 経路を使います。
+合法手生成と反転計算には runtime dispatch を入れており、`x86_64` かつ `avx2` が利用可能な環境では AVX2 経路を使い、それ以外の環境では generic 実装へ自動でフォールバックします。盤面更新は `x86_64` では既定で SSE2 経路を使います。
 
 SIMD 経路は `VELOVERSI_SIMD` で比較用に強制できます。
 
 - `VELOVERSI_SIMD=auto`: 自動選択
 - `VELOVERSI_SIMD=generic`: generic 経路を強制
 - `VELOVERSI_SIMD=sse2`: SSE2 盤面更新経路を強制
-- `VELOVERSI_SIMD=avx2`: AVX2 合法手生成経路を強制
+- `VELOVERSI_SIMD=avx2`: AVX2 合法手生成 + AVX2 反転計算経路を強制
+
+現在の意味は次のとおりです。
+
+- `generic`: movegen=generic / flip=generic / board=generic
+- `sse2`: movegen=generic / flip=generic / board=sse2
+- `avx2`: movegen=avx2 / flip=avx2 / board=sse2
+- `auto`: CPU 機能に応じて自動選択
 
 比較用には次のコマンドを使います。
 
@@ -70,7 +77,7 @@ SIMD 経路は `VELOVERSI_SIMD` で比較用に強制できます。
 
 配布用の `whl` でも、バイナリ全体を特定 CPU 向けに固定せず、実行時に CPU 機能を見て適切な経路を選ぶ構成にしています。
 
-現在の Perft 実装では、`ref` 配下の参考実装を参照しつつ、合法手生成と反転計算を oriented ビットボード寄りのホットパスへ寄せています。あわせて、`board_status` を経由しない Perft 専用経路、深さ 1 / 2 の末端特殊化、長時間検証時のルート手単位並列化を入れています。
+現在の Perft 実装では、`ref` 配下の参考実装を参照しつつ、合法手生成と反転計算を oriented ビットボード寄りのホットパスへ寄せています。あわせて、`board_status` を経由しない Perft 専用経路、深さ 1 / 2 / 3 の末端特殊化、長時間検証時のルート手単位並列化を入れています。
 
 ## Python 拡張モジュールのビルド
 

@@ -6,27 +6,23 @@
 - machine: local dev machine
 - command: `VELOVERSI_SIMD=<backend> cargo test --release perft_bench_initial_position_mode_one_to_depth_thirteen -- --ignored --nocapture`
 - build: release
-- note: 深さ 12 / 13 到達時点の途中観測値。初回ビルド時間を含む。
+- note: 深さ 13 までのコマンド全体時間。単独実行で再計測した値。
 
 ## Generic
 
 | mode | depth | elapsed | note |
 | --- | ---: | ---: | --- |
-| 1 | 12 | 13.78s | table-based flip + 共通基盤化後、build込みの参考値 |
-| 1 | 13 | 33.70s | table-based flip + 共通基盤化後、build込みの参考値 |
-| 1 | 12 | 44.98s | `VELOVERSI_SIMD=generic`、movegen=generic / board=generic |
-| 1 | 13 | 44.98s | `VELOVERSI_SIMD=generic`、movegen=generic / board=generic |
+| 1 | 13 | 20.38s | `VELOVERSI_SIMD=generic`、movegen=generic / flip=generic / board=generic |
 
 ## SIMD
 
 | mode | depth | elapsed | note |
 | --- | ---: | ---: | --- |
-| 1 | 12 | 44.48s | `VELOVERSI_SIMD=sse2`、movegen=generic / board=sse2 |
-| 1 | 13 | 44.48s | `VELOVERSI_SIMD=sse2`、movegen=generic / board=sse2 |
-| 1 | 12 |  | `VELOVERSI_SIMD=avx2` はこのマシンでは未計測 (`avx2` 非対応) |
-| 1 | 13 |  | `VELOVERSI_SIMD=avx2` はこのマシンでは未計測 (`avx2` 非対応) |
+| 1 | 13 | 20.84s | `VELOVERSI_SIMD=sse2`、movegen=generic / flip=generic / board=sse2 |
+| 1 | 13 | 15.28s | `VELOVERSI_SIMD=avx2`、movegen=avx2 / flip=avx2 / board=sse2 |
 
 ## 補足
 
-- `perft_bench_initial_position_mode_one_to_depth_thirteen` は深さ 12 と 13 を連続確認するため、`time` の実測値はコマンド全体の経過時間を表す
-- 手元環境は `avx2` 非対応なので、AVX2 経路の実速度確認は対応 CPU が必要
+- `perft_bench_initial_position_mode_one_to_depth_thirteen` は深さ 13 到達までをまとめて確認するため、`time` の実測値はコマンド全体の経過時間を表す
+- `generic -> sse2` の差は小さく、現状の改善の主因は AVX2 経路
+- 今回の単独再計測では `avx2` は `generic` 比で約 25% 短縮
