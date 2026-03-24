@@ -5,6 +5,7 @@
 - date: 2026-03-22
 - machine: local dev machine
 - note: 初期局面を固定し、同じ API を大量反復する単純ベンチ
+- note: この記録は Step 09 時点の公開面に基づく。Step 10 で bits helper API と `apply_move_unchecked` は Python 非公開へ戻している
 - workload:
   - Rust は `cargo test --release ... -- --ignored --nocapture`
   - Python は `uv run python -m veloversi.bench_api`

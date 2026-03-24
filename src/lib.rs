@@ -2,6 +2,7 @@ mod flip_tables;
 
 use flip_tables::{BB_DLINE02, BB_DLINE57, BB_FLIPPED, BB_H2VLINE, BB_MUL16, BB_SEED, BB_VLINE};
 use pyo3::prelude::*;
+use smallvec::SmallVec;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::{
     __m128i, __m256i, _mm_cvtsi64_si128, _mm_cvtsi128_si64, _mm_or_si128, _mm_set_epi64x,
@@ -36,13 +37,27 @@ pub struct Board {
 // 盤面生成や検証で見つかった不整合を表す。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BoardError {
-    OverlappingBits,
+    OverlappingDiscs,
 }
 
 // 着手位置 1 マスを表す。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Move {
     pub square: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GameResult {
+    BlackWin,
+    WhiteWin,
+    Draw,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DiscCount {
+    pub black: u8,
+    pub white: u8,
+    pub empty: u8,
 }
 
 // 合法手のビット集合と件数をまとめて保持する。
@@ -306,7 +321,7 @@ impl Board {
     // 盤面として最低限成立しているかだけを確認する。
     pub fn validate(&self) -> Result<(), BoardError> {
         if self.black_bits & self.white_bits != 0 {
-            return Err(BoardError::OverlappingBits);
+            return Err(BoardError::OverlappingDiscs);
         }
         Ok(())
     }
@@ -936,6 +951,60 @@ pub fn board_status(board: &Board) -> BoardStatus {
     }
 }
 
+// 指定した手が合法かを返す。
+pub fn is_legal_move(board: &Board, mv: Move) -> bool {
+    if mv.square >= 64 {
+        return false;
+    }
+    generate_legal_moves(board).bitmask & (1u64 << mv.square) != 0
+}
+
+// 合法手ビットマスクを盤面インデックス昇順の配列へ変換する。
+pub fn legal_moves_to_vec(legal: LegalMoves) -> SmallVec<[Move; 32]> {
+    let mut moves = SmallVec::<[Move; 32]>::new();
+    let mut bitmask = legal.bitmask;
+    while bitmask != 0 {
+        let square = bitmask.trailing_zeros() as u8;
+        moves.push(Move { square });
+        bitmask &= bitmask - 1;
+    }
+    moves
+}
+
+// 現局面の石数を返す。
+pub fn disc_count(board: &Board) -> DiscCount {
+    let black = board.black_bits.count_ones() as u8;
+    let white = board.white_bits.count_ones() as u8;
+    DiscCount {
+        black,
+        white,
+        empty: 64 - black - white,
+    }
+}
+
+// 常に黒視点の石差を返す。終局局面では最終石差として解釈できる。
+pub fn final_margin_from_black(board: &Board) -> i8 {
+    let counts = disc_count(board);
+    counts.black as i8 - counts.white as i8
+}
+
+// 常に現手番視点の石差を返す。終局局面では最終石差として解釈できる。
+pub fn final_margin_from_side_to_move(board: &Board) -> i8 {
+    match board.side_to_move {
+        Color::Black => final_margin_from_black(board),
+        Color::White => -final_margin_from_black(board),
+    }
+}
+
+// 常に現在局面の石数比較から勝敗を返す。終局局面では最終結果として解釈できる。
+pub fn game_result(board: &Board) -> GameResult {
+    match final_margin_from_black(board).cmp(&0) {
+        std::cmp::Ordering::Greater => GameResult::BlackWin,
+        std::cmp::Ordering::Less => GameResult::WhiteWin,
+        std::cmp::Ordering::Equal => GameResult::Draw,
+    }
+}
+
 // oriented ビットボードのまま Perft を再帰実行する。
 #[inline(always)]
 fn perft_count_depth_two(board: &mut OrientedBoard, legal: u64, mode: PerftMode) -> u64 {
@@ -1088,6 +1157,22 @@ fn color_to_py_str(color: Color) -> &'static str {
     }
 }
 
+fn board_status_to_py_str(status: BoardStatus) -> &'static str {
+    match status {
+        BoardStatus::Ongoing => "ongoing",
+        BoardStatus::ForcedPass => "forced_pass",
+        BoardStatus::Terminal => "terminal",
+    }
+}
+
+fn game_result_to_py_str(result: GameResult) -> &'static str {
+    match result {
+        GameResult::BlackWin => "black_win",
+        GameResult::WhiteWin => "white_win",
+        GameResult::Draw => "draw",
+    }
+}
+
 fn py_str_to_color(value: &str) -> PyResult<Color> {
     match value.to_ascii_lowercase().as_str() {
         "black" => Ok(Color::Black),
@@ -1156,40 +1241,24 @@ fn generate_legal_moves_py(board: &PyBoard) -> u64 {
 }
 
 #[pyfunction]
-fn generate_legal_moves_bits(
-    black_bits: u64,
-    white_bits: u64,
-    side_to_move: &str,
-) -> PyResult<u64> {
-    let color = py_str_to_color(side_to_move)?;
-    let board = Board::from_bits(black_bits, white_bits, color)
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("invalid board bits"))?;
-    Ok(generate_legal_moves(&board).bitmask)
-}
-
-#[pyfunction(name = "apply_move_unchecked")]
-fn apply_move_unchecked_py(board: &PyBoard, square: u8) -> PyBoard {
-    PyBoard {
-        inner: apply_move_unchecked(&board.inner, Move { square }),
-    }
+fn validate_board(board: &PyBoard) -> PyResult<()> {
+    board
+        .inner
+        .validate()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("invalid board bits"))
 }
 
 #[pyfunction]
-fn apply_move_unchecked_bits(
-    black_bits: u64,
-    white_bits: u64,
-    side_to_move: &str,
-    square: u8,
-) -> PyResult<(u64, u64, &'static str)> {
-    let color = py_str_to_color(side_to_move)?;
-    let board = Board::from_bits(black_bits, white_bits, color)
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("invalid board bits"))?;
-    let next = apply_move_unchecked(&board, Move { square });
-    Ok((
-        next.black_bits,
-        next.white_bits,
-        color_to_py_str(next.side_to_move),
-    ))
+fn legal_moves_list(board: &PyBoard) -> Vec<u32> {
+    legal_moves_to_vec(generate_legal_moves(&board.inner))
+        .into_iter()
+        .map(|mv| mv.square as u32)
+        .collect()
+}
+
+#[pyfunction(name = "is_legal_move")]
+fn is_legal_move_py(board: &PyBoard, square: u8) -> bool {
+    is_legal_move(&board.inner, Move { square })
 }
 
 #[pyfunction(name = "apply_move")]
@@ -1199,23 +1268,32 @@ fn apply_move_py(board: &PyBoard, square: u8) -> PyResult<PyBoard> {
         .map_err(|err| pyo3::exceptions::PyValueError::new_err(format!("{err:?}")))
 }
 
-#[pyfunction]
-fn apply_move_bits(
-    black_bits: u64,
-    white_bits: u64,
-    side_to_move: &str,
-    square: u8,
-) -> PyResult<(u64, u64, &'static str)> {
-    let color = py_str_to_color(side_to_move)?;
-    let board = Board::from_bits(black_bits, white_bits, color)
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("invalid board bits"))?;
-    let next = apply_move(&board, Move { square })
-        .map_err(|err| pyo3::exceptions::PyValueError::new_err(format!("{err:?}")))?;
-    Ok((
-        next.black_bits,
-        next.white_bits,
-        color_to_py_str(next.side_to_move),
-    ))
+#[pyfunction(name = "apply_forced_pass")]
+fn apply_forced_pass_py(board: &PyBoard) -> PyResult<PyBoard> {
+    apply_forced_pass(&board.inner)
+        .map(|inner| PyBoard { inner })
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(format!("{err:?}")))
+}
+
+#[pyfunction(name = "board_status")]
+fn board_status_py(board: &PyBoard) -> &'static str {
+    board_status_to_py_str(board_status(&board.inner))
+}
+
+#[pyfunction(name = "disc_count")]
+fn disc_count_py(board: &PyBoard) -> (u8, u8, u8) {
+    let counts = disc_count(&board.inner);
+    (counts.black, counts.white, counts.empty)
+}
+
+#[pyfunction(name = "game_result")]
+fn game_result_py(board: &PyBoard) -> &'static str {
+    game_result_to_py_str(game_result(&board.inner))
+}
+
+#[pyfunction(name = "final_margin_from_black")]
+fn final_margin_from_black_py(board: &PyBoard) -> i8 {
+    final_margin_from_black(&board.inner)
 }
 
 // Python 拡張モジュールのエントリポイント。
@@ -1224,23 +1302,29 @@ fn _core(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyBoard>()?;
     module.add_function(wrap_pyfunction!(initial_board, module)?)?;
     module.add_function(wrap_pyfunction!(board_from_bits, module)?)?;
+    module.add_function(wrap_pyfunction!(validate_board, module)?)?;
     module.add_function(wrap_pyfunction!(generate_legal_moves_py, module)?)?;
-    module.add_function(wrap_pyfunction!(generate_legal_moves_bits, module)?)?;
-    module.add_function(wrap_pyfunction!(apply_move_unchecked_py, module)?)?;
-    module.add_function(wrap_pyfunction!(apply_move_unchecked_bits, module)?)?;
+    module.add_function(wrap_pyfunction!(legal_moves_list, module)?)?;
+    module.add_function(wrap_pyfunction!(is_legal_move_py, module)?)?;
     module.add_function(wrap_pyfunction!(apply_move_py, module)?)?;
-    module.add_function(wrap_pyfunction!(apply_move_bits, module)?)?;
+    module.add_function(wrap_pyfunction!(apply_forced_pass_py, module)?)?;
+    module.add_function(wrap_pyfunction!(board_status_py, module)?)?;
+    module.add_function(wrap_pyfunction!(disc_count_py, module)?)?;
+    module.add_function(wrap_pyfunction!(game_result_py, module)?)?;
+    module.add_function(wrap_pyfunction!(final_margin_from_black_py, module)?)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        BB_H2VLINE, BB_SEED, Board, BoardBackend, BoardError, BoardStatus, Color, D4, D5, E4, E5,
-        FlipBackend, LegalMoves, Move, MoveError, MovegenBackend, OrientedBoard, PerftError,
-        PerftMode, SimdPreference, apply_forced_pass, apply_move, apply_move_unchecked,
-        board_status, board_with_side_to_move, flips_for_move, flips_for_move_bits_scan,
-        generate_legal_moves, horizontal_seed, legal_moves_bitmask_generic, parse_simd_preference,
+        BB_H2VLINE, BB_SEED, Board, BoardBackend, BoardError, BoardStatus, Color, D4, D5,
+        DiscCount, E4, E5, FlipBackend, GameResult, LegalMoves, Move, MoveError, MovegenBackend,
+        OrientedBoard, PerftError, PerftMode, SimdPreference, apply_forced_pass, apply_move,
+        apply_move_unchecked, board_status, board_with_side_to_move, disc_count,
+        final_margin_from_black, final_margin_from_side_to_move, flips_for_move,
+        flips_for_move_bits_scan, game_result, generate_legal_moves, horizontal_seed,
+        is_legal_move, legal_moves_bitmask_generic, legal_moves_to_vec, parse_simd_preference,
         perft, perft_with_mode_oriented, read_h2vline, selected_flip_backend,
     };
     use rayon::prelude::*;
@@ -1869,7 +1953,7 @@ mod tests {
         // 同じマスに黒白両方の石がある不正入力を拒否することを確認する。
         let result = Board::from_bits(1u64 << D4, 1u64 << D4, Color::Black);
 
-        assert_eq!(result, Err(BoardError::OverlappingBits));
+        assert_eq!(result, Err(BoardError::OverlappingDiscs));
     }
 
     #[test]
@@ -1916,7 +2000,7 @@ mod tests {
         };
 
         assert!(valid.is_ok());
-        assert_eq!(invalid.validate(), Err(BoardError::OverlappingBits));
+        assert_eq!(invalid.validate(), Err(BoardError::OverlappingDiscs));
     }
 
     #[test]
@@ -2860,6 +2944,63 @@ mod tests {
         // 初期局面の黒番合法手 4 つが正しく列挙されることを確認する。
         let expected = (1u64 << 19) | (1u64 << 26) | (1u64 << 37) | (1u64 << 44);
         assert_legal_moves(&Board::new_initial(), expected);
+    }
+
+    #[test]
+    fn is_legal_move_matches_generated_bitmask() {
+        let board = Board::new_initial();
+        let legal = generate_legal_moves(&board);
+
+        for square in 0..64u8 {
+            assert_eq!(
+                is_legal_move(&board, Move { square }),
+                legal.bitmask & bit(square) != 0
+            );
+        }
+    }
+
+    #[test]
+    fn legal_moves_to_vec_returns_ascending_squares() {
+        let legal = generate_legal_moves(&Board::new_initial());
+        let moves = legal_moves_to_vec(legal);
+        let squares: Vec<u8> = moves.into_iter().map(|mv| mv.square).collect();
+        assert_eq!(squares, vec![19, 26, 37, 44]);
+    }
+
+    #[test]
+    fn disc_count_and_margin_match_initial_position() {
+        let board = Board::new_initial();
+        assert_eq!(
+            disc_count(&board),
+            DiscCount {
+                black: 2,
+                white: 2,
+                empty: 60,
+            }
+        );
+        assert_eq!(final_margin_from_black(&board), 0);
+        assert_eq!(final_margin_from_side_to_move(&board), 0);
+        assert_eq!(game_result(&board), GameResult::Draw);
+    }
+
+    #[test]
+    fn margin_and_result_follow_disc_difference_for_any_position() {
+        let board = Board {
+            black_bits: bit(0) | bit(1) | bit(2),
+            white_bits: bit(8),
+            side_to_move: Color::White,
+        };
+        assert_eq!(
+            disc_count(&board),
+            DiscCount {
+                black: 3,
+                white: 1,
+                empty: 60
+            }
+        );
+        assert_eq!(final_margin_from_black(&board), 2);
+        assert_eq!(final_margin_from_side_to_move(&board), -2);
+        assert_eq!(game_result(&board), GameResult::BlackWin);
     }
 
     #[test]

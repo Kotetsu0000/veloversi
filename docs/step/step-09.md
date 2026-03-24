@@ -63,6 +63,9 @@ Step 08 により Rust 側の基礎ホットパスはかなり整理されたが
 - 計測の結果、object API と bits helper API の優劣は API と実行条件でぶれうるため、比較基盤を残して継続確認できる形にした
 - 通常の Python 利用では object API を推奨し、bits helper API は分解済み局面データを既に持っている呼び出し元向けの補助 API と位置付ける
 
+注記:
+- Step 10 で Python 公開面を仕様へ合わせたため、bits helper API と `apply_move_unchecked` は Python 非公開へ戻している
+
 ## 実装方針
 
 - Step 08 で整えた共通内部基盤は維持する

@@ -72,18 +72,18 @@ Step 10 では、[rust_engine_spec.md](/home/kotetsu0000/program/veloversi/specs
 
 ## 受け入れ条件
 
-- [ ] `make check` が成功する
-- [ ] `make coverage-check` が成功する
-- [ ] `make mutants` を実行し、結果を確認する
-- [ ] `specs/rust_engine_spec.md` の対象範囲に関する記述が実装可能な形へ更新されている
-- [ ] Rust 側で `GameResult`、`DiscCount`、`is_legal_move`、`legal_moves_to_vec`、`disc_count`、`final_margin_*`、`game_result` が実装されている
-- [ ] Python 側で `validate_board`、`legal_moves_list`、`is_legal_move`、`apply_forced_pass`、`board_status`、`disc_count`、`game_result`、`final_margin_from_black` が公開されている
-- [ ] `apply_move_unchecked` が Python 公開面から外れている
-- [ ] bits helper API が Python 公開面から外れている
-- [ ] Rust と Python で legal move 出力が一致するテストがある
-- [ ] Rust と Python で `apply_move` / `board_status` / `disc_count` / `game_result` の整合を確認するテストがある
-- [ ] `final_margin_from_black` と `final_margin_from_side_to_move` が全局面で定義されることが仕様書またはコードコメントで明記されている
-- [ ] README または計画書に Python 公開 / 非公開の整理方針が反映されている
+- [x] `make check` が成功する
+- [x] `make coverage-check` が成功する
+- [x] `make mutants` を実行し、結果を確認する
+- [x] `specs/rust_engine_spec.md` の対象範囲に関する記述が実装可能な形へ更新されている
+- [x] Rust 側で `GameResult`、`DiscCount`、`is_legal_move`、`legal_moves_to_vec`、`disc_count`、`final_margin_*`、`game_result` が実装されている
+- [x] Python 側で `validate_board`、`legal_moves_list`、`is_legal_move`、`apply_forced_pass`、`board_status`、`disc_count`、`game_result`、`final_margin_from_black` が公開されている
+- [x] `apply_move_unchecked` が Python 公開面から外れている
+- [x] bits helper API が Python 公開面から外れている
+- [x] Rust と Python で legal move 出力が一致するテストがある
+- [x] Rust と Python で `apply_move` / `board_status` / `disc_count` / `game_result` の整合を確認するテストがある
+- [x] `final_margin_from_black` と `final_margin_from_side_to_move` が全局面で定義されることが仕様書またはコードコメントで明記されている
+- [x] README または計画書に Python 公開 / 非公開の整理方針が反映されている
 
 ## 実装開始時点の不足
 
@@ -91,6 +91,17 @@ Step 10 では、[rust_engine_spec.md](/home/kotetsu0000/program/veloversi/specs
 また、Python 公開面は Step 09 の計測都合で最小 API と bits helper API を先行導入しており、仕様書にある関数一覧と一致していない。
 さらに、仕様書側にも現状の実装方針と合っていない箇所が残っている。
 このため、Step 10 ではまず範囲を `engine-core` と Python 基本 API に限定し、仕様・実装・テストを同時に揃える必要がある。
+
+## このステップの結果
+
+- Rust 側に `GameResult`、`DiscCount`、`is_legal_move`、`legal_moves_to_vec`、`disc_count`、`final_margin_from_black`、`final_margin_from_side_to_move`、`game_result` を追加した
+- Python 公開面を仕様に合わせ、`validate_board`、`legal_moves_list`、`is_legal_move`、`apply_forced_pass`、`board_status`、`disc_count`、`game_result`、`final_margin_from_black` を公開した
+- `apply_move_unchecked` と bits helper API は PyO3 モジュールへ登録しない形で Python 非公開へ戻した
+- `specs/rust_engine_spec.md` は、PyO3 モジュール名、`BoardError`、`final_margin_*`、`game_result` の定義を実装可能な形へ更新した
+- Rust 側のユニットテストと Python 側の pytest を追加し、legal move、着手結果、`board_status`、`disc_count`、`game_result` の整合を確認できるようにした
+- `make check` と `make coverage-check` は通過した
+- `make mutants` は実行済みで、`528 mutants tested in 27m: 84 missed, 369 caught, 63 unviable, 12 timeouts` を確認した
+- `mutants` の残件は大きく 2 系統で、既存 hotpath の equivalent / timeout 系と、`cargo test` だけでは拾いにくい PyO3 ラッパ層である
 
 ## 実装方針
 
