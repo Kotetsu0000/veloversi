@@ -91,6 +91,19 @@ Step 10 時点の Python 公開面は仕様に合わせて `Board` ベース API
 公開するのは `initial_board`、`board_from_bits`、`validate_board`、`generate_legal_moves`、`legal_moves_list`、`is_legal_move`、`apply_move`、`apply_forced_pass`、`board_status`、`disc_count`、`game_result`、`final_margin_from_black` です。
 `apply_move_unchecked` と bits helper API は Python 非公開です。
 
+Step 11 では symmetry API を追加しています。
+公開するのは `all_symmetries`、`transform_board`、`transform_square` です。
+Python では symmetry を次の固定文字列で扱います。
+
+- `identity`
+- `rot90`
+- `rot180`
+- `rot270`
+- `flip_horizontal`
+- `flip_vertical`
+- `flip_diag`
+- `flip_anti_diag`
+
 配布用の `whl` でも、バイナリ全体を特定 CPU 向けに固定せず、実行時に CPU 機能を見て適切な経路を選ぶ構成にしています。
 
 現在の Perft 実装では、`ref` 配下の参考実装を参照しつつ、合法手生成と反転計算を oriented ビットボード寄りのホットパスへ寄せています。あわせて、`board_status` を経由しない Perft 専用経路、深さ 1 / 2 / 3 の末端特殊化、長時間検証時のルート手単位並列化を入れています。

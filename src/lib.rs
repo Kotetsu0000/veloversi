@@ -60,6 +60,18 @@ pub struct DiscCount {
     pub empty: u8,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Symmetry {
+    Identity,
+    Rot90,
+    Rot180,
+    Rot270,
+    FlipHorizontal,
+    FlipVertical,
+    FlipDiag,
+    FlipAntiDiag,
+}
+
 // 合法手のビット集合と件数をまとめて保持する。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LegalMoves {
@@ -341,6 +353,61 @@ fn board_with_side_to_move(board: &Board, side_to_move: Color) -> Board {
         black_bits: board.black_bits,
         white_bits: board.white_bits,
         side_to_move,
+    }
+}
+
+// 利用可能な対称変換を固定順で返す。
+pub fn all_symmetries() -> [Symmetry; 8] {
+    [
+        Symmetry::Identity,
+        Symmetry::Rot90,
+        Symmetry::Rot180,
+        Symmetry::Rot270,
+        Symmetry::FlipHorizontal,
+        Symmetry::FlipVertical,
+        Symmetry::FlipDiag,
+        Symmetry::FlipAntiDiag,
+    ]
+}
+
+// 対称変換後のマス対応を返す。
+pub fn transform_square(square: u8, sym: Symmetry) -> u8 {
+    if square >= 64 {
+        return square;
+    }
+
+    let file = square % 8;
+    let rank = square / 8;
+    let (new_file, new_rank) = match sym {
+        Symmetry::Identity => (file, rank),
+        Symmetry::Rot90 => (7 - rank, file),
+        Symmetry::Rot180 => (7 - file, 7 - rank),
+        Symmetry::Rot270 => (rank, 7 - file),
+        Symmetry::FlipHorizontal => (7 - file, rank),
+        Symmetry::FlipVertical => (file, 7 - rank),
+        Symmetry::FlipDiag => (rank, file),
+        Symmetry::FlipAntiDiag => (7 - rank, 7 - file),
+    };
+    new_rank * 8 + new_file
+}
+
+fn transform_bits(bits: u64, sym: Symmetry) -> u64 {
+    let mut src = bits;
+    let mut dst = 0u64;
+    while src != 0 {
+        let square = src.trailing_zeros() as u8;
+        dst |= 1u64 << transform_square(square, sym);
+        src &= src - 1;
+    }
+    dst
+}
+
+// 盤面に対して対称変換を適用した盤面を返す。手番は保持する。
+pub fn transform_board(board: &Board, sym: Symmetry) -> Board {
+    Board {
+        black_bits: transform_bits(board.black_bits, sym),
+        white_bits: transform_bits(board.white_bits, sym),
+        side_to_move: board.side_to_move,
     }
 }
 
@@ -1173,6 +1240,35 @@ fn game_result_to_py_str(result: GameResult) -> &'static str {
     }
 }
 
+fn symmetry_to_py_str(sym: Symmetry) -> &'static str {
+    match sym {
+        Symmetry::Identity => "identity",
+        Symmetry::Rot90 => "rot90",
+        Symmetry::Rot180 => "rot180",
+        Symmetry::Rot270 => "rot270",
+        Symmetry::FlipHorizontal => "flip_horizontal",
+        Symmetry::FlipVertical => "flip_vertical",
+        Symmetry::FlipDiag => "flip_diag",
+        Symmetry::FlipAntiDiag => "flip_anti_diag",
+    }
+}
+
+fn py_str_to_symmetry(value: &str) -> PyResult<Symmetry> {
+    match value {
+        "identity" => Ok(Symmetry::Identity),
+        "rot90" => Ok(Symmetry::Rot90),
+        "rot180" => Ok(Symmetry::Rot180),
+        "rot270" => Ok(Symmetry::Rot270),
+        "flip_horizontal" => Ok(Symmetry::FlipHorizontal),
+        "flip_vertical" => Ok(Symmetry::FlipVertical),
+        "flip_diag" => Ok(Symmetry::FlipDiag),
+        "flip_anti_diag" => Ok(Symmetry::FlipAntiDiag),
+        _ => Err(pyo3::exceptions::PyValueError::new_err(
+            "unknown symmetry name",
+        )),
+    }
+}
+
 fn py_str_to_color(value: &str) -> PyResult<Color> {
     match value.to_ascii_lowercase().as_str() {
         "black" => Ok(Color::Black),
@@ -1296,6 +1392,31 @@ fn final_margin_from_black_py(board: &PyBoard) -> i8 {
     final_margin_from_black(&board.inner)
 }
 
+#[pyfunction(name = "transform_board")]
+fn transform_board_py(board: &PyBoard, sym: &str) -> PyResult<PyBoard> {
+    Ok(PyBoard {
+        inner: transform_board(&board.inner, py_str_to_symmetry(sym)?),
+    })
+}
+
+#[pyfunction(name = "transform_square")]
+fn transform_square_py(square: u8, sym: &str) -> PyResult<u8> {
+    if square >= 64 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "square must be in 0..64",
+        ));
+    }
+    Ok(transform_square(square, py_str_to_symmetry(sym)?))
+}
+
+#[pyfunction(name = "all_symmetries")]
+fn all_symmetries_py() -> Vec<&'static str> {
+    all_symmetries()
+        .into_iter()
+        .map(symmetry_to_py_str)
+        .collect()
+}
+
 // Python 拡張モジュールのエントリポイント。
 #[pymodule]
 fn _core(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -1312,6 +1433,9 @@ fn _core(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(disc_count_py, module)?)?;
     module.add_function(wrap_pyfunction!(game_result_py, module)?)?;
     module.add_function(wrap_pyfunction!(final_margin_from_black_py, module)?)?;
+    module.add_function(wrap_pyfunction!(transform_board_py, module)?)?;
+    module.add_function(wrap_pyfunction!(transform_square_py, module)?)?;
+    module.add_function(wrap_pyfunction!(all_symmetries_py, module)?)?;
     Ok(())
 }
 
@@ -1320,12 +1444,13 @@ mod tests {
     use super::{
         BB_H2VLINE, BB_SEED, Board, BoardBackend, BoardError, BoardStatus, Color, D4, D5,
         DiscCount, E4, E5, FlipBackend, GameResult, LegalMoves, Move, MoveError, MovegenBackend,
-        OrientedBoard, PerftError, PerftMode, SimdPreference, apply_forced_pass, apply_move,
-        apply_move_unchecked, board_status, board_with_side_to_move, disc_count,
-        final_margin_from_black, final_margin_from_side_to_move, flips_for_move,
+        OrientedBoard, PerftError, PerftMode, SimdPreference, Symmetry, all_symmetries,
+        apply_forced_pass, apply_move, apply_move_unchecked, board_status, board_with_side_to_move,
+        disc_count, final_margin_from_black, final_margin_from_side_to_move, flips_for_move,
         flips_for_move_bits_scan, game_result, generate_legal_moves, horizontal_seed,
         is_legal_move, legal_moves_bitmask_generic, legal_moves_to_vec, parse_simd_preference,
-        perft, perft_with_mode_oriented, read_h2vline, selected_flip_backend,
+        perft, perft_with_mode_oriented, read_h2vline, selected_flip_backend, transform_board,
+        transform_square,
     };
     use rayon::prelude::*;
 
@@ -3001,6 +3126,123 @@ mod tests {
         assert_eq!(final_margin_from_black(&board), 2);
         assert_eq!(final_margin_from_side_to_move(&board), -2);
         assert_eq!(game_result(&board), GameResult::BlackWin);
+    }
+
+    #[test]
+    fn all_symmetries_returns_fixed_order() {
+        assert_eq!(
+            all_symmetries(),
+            [
+                Symmetry::Identity,
+                Symmetry::Rot90,
+                Symmetry::Rot180,
+                Symmetry::Rot270,
+                Symmetry::FlipHorizontal,
+                Symmetry::FlipVertical,
+                Symmetry::FlipDiag,
+                Symmetry::FlipAntiDiag,
+            ]
+        );
+    }
+
+    #[test]
+    fn transform_square_matches_fixed_coordinate_mapping() {
+        let square = 19u8;
+        assert_eq!(transform_square(square, Symmetry::Identity), 19);
+        assert_eq!(transform_square(square, Symmetry::Rot90), 29);
+        assert_eq!(transform_square(square, Symmetry::Rot180), 44);
+        assert_eq!(transform_square(square, Symmetry::Rot270), 34);
+        assert_eq!(transform_square(square, Symmetry::FlipHorizontal), 20);
+        assert_eq!(transform_square(square, Symmetry::FlipVertical), 43);
+        assert_eq!(transform_square(square, Symmetry::FlipDiag), 26);
+        assert_eq!(transform_square(square, Symmetry::FlipAntiDiag), 37);
+    }
+
+    #[test]
+    fn rotational_and_reflection_symmetries_round_trip() {
+        let square = 19u8;
+        let mut rotated = square;
+        for _ in 0..4 {
+            rotated = transform_square(rotated, Symmetry::Rot90);
+        }
+        assert_eq!(rotated, square);
+        assert_eq!(
+            transform_square(
+                transform_square(square, Symmetry::FlipHorizontal),
+                Symmetry::FlipHorizontal
+            ),
+            square
+        );
+        assert_eq!(
+            transform_square(
+                transform_square(square, Symmetry::FlipVertical),
+                Symmetry::FlipVertical
+            ),
+            square
+        );
+        assert_eq!(
+            transform_square(
+                transform_square(square, Symmetry::FlipDiag),
+                Symmetry::FlipDiag
+            ),
+            square
+        );
+        assert_eq!(
+            transform_square(
+                transform_square(square, Symmetry::FlipAntiDiag),
+                Symmetry::FlipAntiDiag
+            ),
+            square
+        );
+    }
+
+    #[test]
+    fn transform_board_preserves_side_to_move_and_counts() {
+        let board = Board {
+            black_bits: bit(19) | bit(26) | bit(44),
+            white_bits: bit(20) | bit(29),
+            side_to_move: Color::White,
+        };
+        let transformed = transform_board(&board, Symmetry::Rot90);
+        assert_eq!(transformed.side_to_move, Color::White);
+        assert_eq!(disc_count(&transformed), disc_count(&board));
+        assert_eq!(
+            final_margin_from_black(&transformed),
+            final_margin_from_black(&board)
+        );
+    }
+
+    #[test]
+    fn transform_board_matches_squarewise_mapping() {
+        let board = Board {
+            black_bits: bit(0) | bit(19) | bit(63),
+            white_bits: bit(7) | bit(28),
+            side_to_move: Color::Black,
+        };
+        let transformed = transform_board(&board, Symmetry::FlipDiag);
+        let mut expected_black = 0u64;
+        for sq in [0u8, 19, 63] {
+            expected_black |= bit(transform_square(sq, Symmetry::FlipDiag));
+        }
+        let mut expected_white = 0u64;
+        for sq in [7u8, 28] {
+            expected_white |= bit(transform_square(sq, Symmetry::FlipDiag));
+        }
+        assert_eq!(transformed.black_bits, expected_black);
+        assert_eq!(transformed.white_bits, expected_white);
+    }
+
+    #[test]
+    fn transformed_legal_moves_match_transformed_squares() {
+        let board = Board::new_initial();
+        let transformed = transform_board(&board, Symmetry::Rot90);
+        let transformed_legal = generate_legal_moves(&transformed);
+        let expected = legal_moves_to_vec(generate_legal_moves(&board))
+            .into_iter()
+            .fold(0u64, |acc, mv| {
+                acc | bit(transform_square(mv.square, Symmetry::Rot90))
+            });
+        assert_eq!(transformed_legal.bitmask, expected);
     }
 
     #[test]
