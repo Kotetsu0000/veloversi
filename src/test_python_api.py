@@ -1,3 +1,5 @@
+from typing import cast
+
 import pytest
 import veloversi
 import veloversi._core as core
@@ -16,8 +18,10 @@ from veloversi import (
     initial_board,
     is_legal_move,
     legal_moves_list,
+    pack_board,
     transform_board,
     transform_square,
+    unpack_board,
     validate_board,
 )
 
@@ -35,6 +39,12 @@ def test_board_round_trip_and_validate() -> None:
     assert core_board.white_bits == board.white_bits
     assert core_board.side_to_move == board.side_to_move
     assert core_board.to_bits() == board.to_bits()
+
+    packed = pack_board(board)
+    assert packed == board.to_bits()
+    assert unpack_board(packed).to_bits() == board.to_bits()
+    assert core.pack_board(board) == board.to_bits()
+    assert core._unpack_board_parts(*packed).to_bits() == board.to_bits()
 
 
 def test_generate_legal_moves_helpers_match_initial_position() -> None:
@@ -157,3 +167,39 @@ def test_unknown_symmetry_name_raises_value_error() -> None:
 def test_transform_square_rejects_out_of_range_square() -> None:
     with pytest.raises(ValueError):
         core.transform_square(64, "identity")
+
+
+def test_pack_unpack_round_trip_and_fixed_initial_tuple() -> None:
+    board = initial_board()
+
+    assert pack_board(board) == (0x0000_0008_1000_0000, 0x0000_0010_0800_0000, "black")
+    assert unpack_board(pack_board(board)).to_bits() == board.to_bits()
+
+    moved = apply_move(board, 19)
+    packed = pack_board(moved)
+    assert unpack_board(packed).to_bits() == moved.to_bits()
+    assert core.pack_board(moved) == packed
+    assert core._unpack_board_parts(*packed).to_bits() == moved.to_bits()
+
+
+@pytest.mark.parametrize(
+    ("packed", "message"),
+    [
+        (123, "tuple"),
+        ((1, 2), "tuple"),
+        ((1, 2, 3, 4), "tuple"),
+        (("x", 2, "black"), r"packed\[0\]"),
+        ((1, "x", "black"), r"packed\[1\]"),
+        ((1, 2, 3), r"packed\[2\]"),
+        ((1, 2, "bad"), "side_to_move"),
+        ((1, 1, "black"), "invalid board bits"),
+    ],
+)
+def test_unpack_board_rejects_invalid_python_inputs(packed: object, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        unpack_board(packed)  # type: ignore[arg-type]
+
+    if packed in ((1, 2, "bad"), (1, 1, "black")):
+        packed_tuple = cast(tuple[int, int, str], packed)
+        with pytest.raises(ValueError, match=message):
+            core._unpack_board_parts(*packed_tuple)

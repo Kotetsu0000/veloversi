@@ -61,6 +61,13 @@ pub struct DiscCount {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PackedBoard {
+    pub black_bits: u64,
+    pub white_bits: u64,
+    pub side_to_move: Color,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Symmetry {
     Identity,
     Rot90,
@@ -337,6 +344,20 @@ impl Board {
         }
         Ok(())
     }
+}
+
+// 盤面を固定長の軽量表現へ変換する。
+pub fn pack_board(board: &Board) -> PackedBoard {
+    PackedBoard {
+        black_bits: board.black_bits,
+        white_bits: board.white_bits,
+        side_to_move: board.side_to_move,
+    }
+}
+
+// 固定長表現から盤面を復元する。
+pub fn unpack_board(packed: PackedBoard) -> Result<Board, BoardError> {
+    Board::from_bits(packed.black_bits, packed.white_bits, packed.side_to_move)
 }
 
 // 現在の手番に対応する石配置を player / opponent の並びで返す。
@@ -1279,6 +1300,15 @@ fn py_str_to_color(value: &str) -> PyResult<Color> {
     }
 }
 
+#[cfg(not(any(test, coverage)))]
+fn packed_board_to_py_tuple(packed: PackedBoard) -> (u64, u64, &'static str) {
+    (
+        packed.black_bits,
+        packed.white_bits,
+        color_to_py_str(packed.side_to_move),
+    )
+}
+
 #[pymethods]
 impl PyBoard {
     #[new]
@@ -1329,6 +1359,29 @@ fn initial_board() -> PyBoard {
 #[pyfunction]
 fn board_from_bits(black_bits: u64, white_bits: u64, side_to_move: &str) -> PyResult<PyBoard> {
     PyBoard::py_new(black_bits, white_bits, side_to_move)
+}
+
+#[pyfunction(name = "pack_board")]
+#[cfg(not(any(test, coverage)))]
+fn pack_board_py(board: &PyBoard) -> (u64, u64, &'static str) {
+    packed_board_to_py_tuple(pack_board(&board.inner))
+}
+
+#[pyfunction(name = "_unpack_board_parts")]
+#[cfg(not(any(test, coverage)))]
+fn unpack_board_parts_py(
+    black_bits: u64,
+    white_bits: u64,
+    side_to_move: &str,
+) -> PyResult<PyBoard> {
+    let packed = PackedBoard {
+        black_bits,
+        white_bits,
+        side_to_move: py_str_to_color(side_to_move)?,
+    };
+    unpack_board(packed)
+        .map(|inner| PyBoard { inner })
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("invalid board bits"))
 }
 
 #[pyfunction(name = "generate_legal_moves")]
@@ -1423,6 +1476,10 @@ fn _core(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyBoard>()?;
     module.add_function(wrap_pyfunction!(initial_board, module)?)?;
     module.add_function(wrap_pyfunction!(board_from_bits, module)?)?;
+    #[cfg(not(any(test, coverage)))]
+    module.add_function(wrap_pyfunction!(pack_board_py, module)?)?;
+    #[cfg(not(any(test, coverage)))]
+    module.add_function(wrap_pyfunction!(unpack_board_parts_py, module)?)?;
     module.add_function(wrap_pyfunction!(validate_board, module)?)?;
     module.add_function(wrap_pyfunction!(generate_legal_moves_py, module)?)?;
     module.add_function(wrap_pyfunction!(legal_moves_list, module)?)?;
@@ -1444,13 +1501,13 @@ mod tests {
     use super::{
         BB_H2VLINE, BB_SEED, Board, BoardBackend, BoardError, BoardStatus, Color, D4, D5,
         DiscCount, E4, E5, FlipBackend, GameResult, LegalMoves, Move, MoveError, MovegenBackend,
-        OrientedBoard, PerftError, PerftMode, SimdPreference, Symmetry, all_symmetries,
-        apply_forced_pass, apply_move, apply_move_unchecked, board_status, board_with_side_to_move,
-        disc_count, final_margin_from_black, final_margin_from_side_to_move, flips_for_move,
-        flips_for_move_bits_scan, game_result, generate_legal_moves, horizontal_seed,
-        is_legal_move, legal_moves_bitmask_generic, legal_moves_to_vec, parse_simd_preference,
-        perft, perft_with_mode_oriented, read_h2vline, selected_flip_backend, transform_board,
-        transform_square,
+        OrientedBoard, PackedBoard, PerftError, PerftMode, SimdPreference, Symmetry,
+        all_symmetries, apply_forced_pass, apply_move, apply_move_unchecked, board_status,
+        board_with_side_to_move, disc_count, final_margin_from_black,
+        final_margin_from_side_to_move, flips_for_move, flips_for_move_bits_scan, game_result,
+        generate_legal_moves, horizontal_seed, is_legal_move, legal_moves_bitmask_generic,
+        legal_moves_to_vec, pack_board, parse_simd_preference, perft, perft_with_mode_oriented,
+        read_h2vline, selected_flip_backend, transform_board, transform_square, unpack_board,
     };
     use rayon::prelude::*;
 
@@ -2126,6 +2183,74 @@ mod tests {
 
         assert!(valid.is_ok());
         assert_eq!(invalid.validate(), Err(BoardError::OverlappingDiscs));
+    }
+
+    #[test]
+    fn packed_board_keeps_black_white_bits_and_side_to_move() {
+        // PackedBoard が盤面の固定長表現として各値をそのまま保持できることを確認する。
+        let packed = PackedBoard {
+            black_bits: 0x12,
+            white_bits: 0x34,
+            side_to_move: Color::White,
+        };
+
+        assert_eq!(packed.black_bits, 0x12);
+        assert_eq!(packed.white_bits, 0x34);
+        assert_eq!(packed.side_to_move, Color::White);
+    }
+
+    #[test]
+    fn pack_board_matches_initial_position_expected_values() {
+        // 初期局面を pack_board した結果が固定値どおりであることを確認する。
+        let packed = pack_board(&Board::new_initial());
+
+        assert_eq!(
+            packed,
+            PackedBoard {
+                black_bits: (1u64 << E4) | (1u64 << D5),
+                white_bits: (1u64 << D4) | (1u64 << E5),
+                side_to_move: Color::Black,
+            }
+        );
+    }
+
+    #[test]
+    fn pack_then_unpack_restores_original_board() {
+        // pack -> unpack の往復で元の盤面が保たれることを確認する。
+        let board = Board {
+            black_bits: 0x00FF_0000_0000_0000,
+            white_bits: 0x0000_0000_00FF_0000,
+            side_to_move: Color::White,
+        };
+
+        assert_eq!(unpack_board(pack_board(&board)), Ok(board));
+    }
+
+    #[test]
+    fn unpack_then_pack_restores_packed_representation() {
+        // unpack -> pack の往復で fixed-length 表現が保たれることを確認する。
+        let packed = PackedBoard {
+            black_bits: 0x0000_0018_1000_0000,
+            white_bits: 0x0000_0000_0810_0000,
+            side_to_move: Color::Black,
+        };
+
+        assert_eq!(
+            unpack_board(packed).map(|board| pack_board(&board)),
+            Ok(packed)
+        );
+    }
+
+    #[test]
+    fn unpack_board_rejects_overlapping_discs() {
+        // 非合法 packed からの復元で BoardError を返すことを確認する。
+        let packed = PackedBoard {
+            black_bits: 1u64 << D4,
+            white_bits: 1u64 << D4,
+            side_to_move: Color::Black,
+        };
+
+        assert_eq!(unpack_board(packed), Err(BoardError::OverlappingDiscs));
     }
 
     #[test]

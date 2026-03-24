@@ -567,6 +567,18 @@ pub fn encode_nnue_features(board: &Board) -> NnueSparseFeatures
 
 ### 5.7 serialize モジュール
 
+```rust
+pub struct PackedBoard {
+    pub black_bits: u64,
+    pub white_bits: u64,
+    pub side_to_move: Color,
+}
+```
+
+説明:
+- `Board` と 1 対 1 対応する固定長表現
+- `Copy` / `Clone` / `Eq` / `Debug` を持つ軽量値オブジェクトとして扱う
+
 #### 5.7.1 `pack_board`
 
 ```rust
@@ -744,6 +756,8 @@ class Board:
 ```python
 def initial_board() -> Board: ...
 def board_from_bits(black_bits: int, white_bits: int, side_to_move: str) -> Board: ...
+def pack_board(board: Board) -> tuple[int, int, str]: ...
+def unpack_board(packed: tuple[int, int, str]) -> Board: ...
 def validate_board(board: Board) -> None: ...
 def generate_legal_moves(board: Board) -> int: ...
 def legal_moves_list(board: Board) -> list[int]: ...

@@ -104,6 +104,10 @@ Python では symmetry を次の固定文字列で扱います。
 - `flip_diag`
 - `flip_anti_diag`
 
+Step 12 では serialize API を追加しています。
+公開するのは `pack_board`、`unpack_board` です。
+Python では packed 形式を `(black_bits, white_bits, side_to_move)` の tuple で扱います。
+
 配布用の `whl` でも、バイナリ全体を特定 CPU 向けに固定せず、実行時に CPU 機能を見て適切な経路を選ぶ構成にしています。
 
 現在の Perft 実装では、`ref` 配下の参考実装を参照しつつ、合法手生成と反転計算を oriented ビットボード寄りのホットパスへ寄せています。あわせて、`board_status` を経由しない Perft 専用経路、深さ 1 / 2 / 3 の末端特殊化、長時間検証時のルート手単位並列化を入れています。

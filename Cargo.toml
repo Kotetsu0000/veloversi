@@ -16,3 +16,6 @@ smallvec = "1.14"
 
 [dev-dependencies]
 rayon = "1.11"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)'] }
