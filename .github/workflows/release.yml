@@ -9,9 +9,6 @@ on:
 permissions:
   contents: write
 
-env:
-  PYTHON_VERSIONS: '["3.12", "3.13", "3.14"]'
-
 jobs:
   build-wheels:
     name: Build wheel (${{ matrix.name }})
@@ -100,7 +97,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ${{ fromJSON(env.PYTHON_VERSIONS) }}
+        python-version: ["3.12", "3.13", "3.14"]
 
     steps:
       - name: Set up Python
