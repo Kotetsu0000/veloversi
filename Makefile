@@ -21,7 +21,7 @@ format:
 check: format lint test
 
 mutants:
-	cargo mutants --file src/lib.rs -j 8
+	cargo mutants --file 'src/*.rs' --exclude src/flip_tables.rs -j 8
 
 coverage:
 	cargo llvm-cov --html

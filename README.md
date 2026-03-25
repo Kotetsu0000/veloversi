@@ -47,7 +47,7 @@ uv run pytest
 uv run ruff check .
 uv run ruff format --check .
 uv run basedpyright
-cargo mutants --file src/lib.rs -j 8
+cargo mutants --file 'src/*.rs' --exclude src/flip_tables.rs -j 8
 cargo llvm-cov --html
 cargo llvm-cov --fail-under-lines 80
 cargo test --release perft_long_initial_position_mode_one_to_depth_fifteen -- --ignored --nocapture
@@ -145,7 +145,7 @@ cargo install cargo-mutants
 実行コマンド:
 
 ```bash
-cargo mutants --file src/lib.rs -j 8
+cargo mutants --file 'src/*.rs' --exclude src/flip_tables.rs -j 8
 ```
 
 ## cargo-llvm-cov
