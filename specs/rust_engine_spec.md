@@ -521,23 +521,46 @@ pub struct FeatureConfig {
 #### 5.6.2 `encode_planes`
 
 ```rust
-pub fn encode_planes(
-    current: &Board,
-    history: &[Board],
+pub struct EncodedPlanes {
+    pub channels: usize,
+    pub width: usize,
+    pub height: usize,
+    pub data_f32: Vec<f32>,
+}
+
+pub struct EncodedPlanesBatch {
+    pub batch: usize,
+    pub channels: usize,
+    pub width: usize,
+    pub height: usize,
+    pub data_f32: Vec<f32>,
+}
+
+pub fn encode_planes(current: &Board, history: &[Board], config: &FeatureConfig) -> EncodedPlanes
+
+pub fn encode_planes_batch(
+    boards: &[Board],
+    histories: &[Vec<Board>],
     config: &FeatureConfig,
-) -> Result<EncodedPlanes, FeatureError>
+) -> EncodedPlanesBatch
 ```
 
 説明:
 - 指定設定に従い 2D 平面特徴を生成する
-- `history` は古い順または新しい順のどちらかを固定し、仕様コメントに明記する
+- `history` は新しい順で受け取る
 - `history` 長が不足する場合の埋め方は 0 埋めを標準とする
+- planes は `channels_first` で返す
+- dtype は `float32` とする
+- Step 14 の dense feature では、current と history 各局面について 2 plane を持つ
+- `include_legal_mask` / `include_phase_plane` / `include_turn_plane` は current 局面に対する追加 plane とする
 
 戻り値:
 - `EncodedPlanes { channels, width, height, data_f32 }`
+- batch 版は `EncodedPlanesBatch { batch, channels, width, height, data_f32 }`
 
 期待結果:
 - `data_f32` は `[C, H, W]` 順に並ぶ連続配列
+- batch 版は `[B, C, H, W]` 順に並ぶ連続配列
 - Python 側で `torch.float32` に変換しやすい配置であること
 
 公開範囲:
@@ -545,7 +568,45 @@ pub fn encode_planes(
 - Python 公開
 - WASM 非公開
 
-#### 5.6.3 `encode_nnue_features`
+#### 5.6.3 `encode_flat_features`
+
+```rust
+pub struct EncodedFlatFeatures {
+    pub len: usize,
+    pub data_f32: Vec<f32>,
+}
+
+pub struct EncodedFlatFeaturesBatch {
+    pub batch: usize,
+    pub len: usize,
+    pub data_f32: Vec<f32>,
+}
+
+pub fn encode_flat_features(
+    current: &Board,
+    history: &[Board],
+    config: &FeatureConfig,
+) -> EncodedFlatFeatures
+
+pub fn encode_flat_features_batch(
+    boards: &[Board],
+    histories: &[Vec<Board>],
+    config: &FeatureConfig,
+) -> EncodedFlatFeaturesBatch
+```
+
+説明:
+- MLP 向けの固定長 split-flat 特徴を生成する
+- 各 frame ごとに 2 本の 64 要素 occupancy を持つ
+- `include_legal_mask` は 64 要素、`include_phase_plane` と `include_turn_plane` は 1 要素を追加する
+- dtype は `float32` とする
+
+公開範囲:
+- Rust 公開
+- Python 公開
+- WASM 非公開
+
+#### 5.6.4 `encode_nnue_features`
 
 ```rust
 pub fn encode_nnue_features(board: &Board) -> NnueSparseFeatures
@@ -796,6 +857,9 @@ def disc_count(board: Board) -> tuple[int, int, int]: ...
 def game_result(board: Board) -> str: ...
 def final_margin_from_black(board: Board) -> int: ...
 def encode_planes(board: Board, history: list[Board], config: dict) -> numpy.ndarray: ...
+def encode_planes_batch(boards: list[Board], histories: list[list[Board]], config: dict) -> numpy.ndarray: ...
+def encode_flat_features(board: Board, history: list[Board], config: dict) -> numpy.ndarray: ...
+def encode_flat_features_batch(boards: list[Board], histories: list[list[Board]], config: dict) -> numpy.ndarray: ...
 def encode_nnue_features(board: Board) -> tuple[numpy.ndarray, numpy.ndarray]: ...
 def transform_board(board: Board, sym: str) -> Board: ...
 def transform_square(square: int, sym: str) -> int: ...

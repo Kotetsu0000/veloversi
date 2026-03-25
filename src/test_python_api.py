@@ -1,5 +1,6 @@
 from typing import cast
 
+import numpy as np
 import pytest
 import veloversi
 import veloversi._core as core
@@ -12,6 +13,10 @@ from veloversi import (
     board_from_bits,
     board_status,
     disc_count,
+    encode_flat_features,
+    encode_flat_features_batch,
+    encode_planes,
+    encode_planes_batch,
     final_margin_from_black,
     game_result,
     generate_legal_moves,
@@ -249,6 +254,107 @@ def test_random_play_public_api_rejects_invalid_config() -> None:
 
     with pytest.raises(ValueError, match="min_plies must be less than or equal to max_plies"):
         sample_reachable_positions(1, {"num_positions": 1, "min_plies": 3, "max_plies": 1})
+
+
+def test_encode_planes_and_flat_features_return_float32_arrays() -> None:
+    board = initial_board()
+    config = {
+        "history_len": 2,
+        "include_legal_mask": True,
+        "include_phase_plane": True,
+        "include_turn_plane": True,
+        "perspective": "absolute_color",
+    }
+
+    planes = encode_planes(board, [], config)
+    flat = encode_flat_features(board, [], config)
+
+    assert isinstance(planes, np.ndarray)
+    assert isinstance(flat, np.ndarray)
+    assert planes.dtype == np.float32
+    assert flat.dtype == np.float32
+    assert planes.shape == (9, 8, 8)
+    assert flat.shape == (128 * 3 + 64 + 1 + 1,)
+
+
+def test_encode_feature_batches_match_single_position_results() -> None:
+    board_a = initial_board()
+    board_b = apply_move(board_a, 19)
+    config = {
+        "history_len": 1,
+        "include_legal_mask": True,
+        "include_phase_plane": False,
+        "include_turn_plane": True,
+        "perspective": "absolute_color",
+    }
+
+    single_planes_a = encode_planes(board_a, [board_b], config)
+    single_planes_b = encode_planes(board_b, [board_a], config)
+    single_flat_a = encode_flat_features(board_a, [board_b], config)
+    single_flat_b = encode_flat_features(board_b, [board_a], config)
+
+    batch_planes = encode_planes_batch([board_a, board_b], [[board_b], [board_a]], config)
+    batch_flat = encode_flat_features_batch([board_a, board_b], [[board_b], [board_a]], config)
+
+    assert batch_planes.shape == (2,) + single_planes_a.shape
+    assert batch_flat.shape == (2,) + single_flat_a.shape
+    assert np.array_equal(batch_planes[0], single_planes_a)
+    assert np.array_equal(batch_planes[1], single_planes_b)
+    assert np.array_equal(batch_flat[0], single_flat_a)
+    assert np.array_equal(batch_flat[1], single_flat_b)
+
+
+def test_encode_planes_uses_newest_first_history_and_zero_fills() -> None:
+    board = initial_board()
+    history_newest = board_from_bits(1, 2, "black")
+    history_older = board_from_bits(4, 8, "white")
+    planes = encode_planes(
+        board,
+        [history_newest, history_older],
+        {"history_len": 3, "perspective": "absolute_color"},
+    )
+
+    assert planes[0, 3, 4] == np.float32(1.0)
+    assert planes[1, 3, 3] == np.float32(1.0)
+    assert planes[2, 0, 0] == np.float32(1.0)
+    assert planes[3, 0, 1] == np.float32(1.0)
+    assert planes[4, 0, 2] == np.float32(1.0)
+    assert planes[5, 0, 3] == np.float32(1.0)
+    assert np.all(planes[6:8] == np.float32(0.0))
+
+
+def test_encode_planes_reflects_side_to_move_perspective() -> None:
+    board = board_from_bits(1, 2, "white")
+
+    absolute = encode_planes(board, [], {"perspective": "absolute_color"})
+    relative = encode_planes(board, [], {"perspective": "side_to_move"})
+
+    assert absolute[0, 0, 0] == np.float32(1.0)
+    assert absolute[1, 0, 1] == np.float32(1.0)
+    assert relative[0, 0, 1] == np.float32(1.0)
+    assert relative[1, 0, 0] == np.float32(1.0)
+
+
+def test_feature_public_api_rejects_invalid_inputs() -> None:
+    board = initial_board()
+
+    with pytest.raises(ValueError, match="config"):
+        encode_planes(board, [], [])  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="history"):
+        encode_planes(board, (), {"history_len": 0})  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="history_len"):
+        encode_planes(board, [], {"history_len": -1})
+
+    with pytest.raises(ValueError, match="include_legal_mask"):
+        encode_planes(board, [], {"include_legal_mask": 1})
+
+    with pytest.raises(ValueError, match="perspective"):
+        encode_planes(board, [], {"perspective": "bad"})
+
+    with pytest.raises(ValueError, match="same length"):
+        encode_planes_batch([board], [[], []], {"history_len": 0})
 
 
 @pytest.mark.parametrize(

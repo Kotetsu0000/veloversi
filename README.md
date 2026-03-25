@@ -47,7 +47,7 @@ uv run pytest
 uv run ruff check .
 uv run ruff format --check .
 uv run basedpyright
-cargo mutants --file src/lib.rs
+cargo mutants --file src/lib.rs -j 8
 cargo llvm-cov --html
 cargo llvm-cov --fail-under-lines 80
 cargo test --release perft_long_initial_position_mode_one_to_depth_fifteen -- --ignored --nocapture
@@ -113,6 +113,12 @@ Step 13 では random_play API を追加しています。
 `play_random_game` はランダム対局トレースを返し、`boards`、`moves`、`final_result`、`final_margin_from_black`、`plies_played`、`reached_terminal` を含みます。
 パスは `moves` 内で `None` として表現します。
 
+Step 14 では feature API を追加しています。
+公開するのは `encode_planes`、`encode_planes_batch`、`encode_flat_features`、`encode_flat_features_batch` です。
+planes は `channels_first` で返り、shape は単一局面で `(C, 8, 8)`、batch で `(B, C, 8, 8)` です。
+flat は shape が単一局面で `(F,)`、batch で `(B, F)` です。
+どちらも `numpy.ndarray` の `float32` を返し、`history` は新しい順で受け取ります。
+
 配布用の `whl` でも、バイナリ全体を特定 CPU 向けに固定せず、実行時に CPU 機能を見て適切な経路を選ぶ構成にしています。
 
 現在の Perft 実装では、`ref` 配下の参考実装を参照しつつ、合法手生成と反転計算を oriented ビットボード寄りのホットパスへ寄せています。あわせて、`board_status` を経由しない Perft 専用経路、深さ 1 / 2 / 3 の末端特殊化、長時間検証時のルート手単位並列化を入れています。
@@ -139,7 +145,7 @@ cargo install cargo-mutants
 実行コマンド:
 
 ```bash
-cargo mutants --file src/lib.rs
+cargo mutants --file src/lib.rs -j 8
 ```
 
 ## cargo-llvm-cov

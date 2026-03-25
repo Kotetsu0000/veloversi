@@ -1,6 +1,10 @@
 mod flip_tables;
 
 use flip_tables::{BB_DLINE02, BB_DLINE57, BB_FLIPPED, BB_H2VLINE, BB_MUL16, BB_SEED, BB_VLINE};
+#[cfg(not(any(test, coverage)))]
+use ndarray::{Array1, Array2, Array3, Array4};
+#[cfg(not(any(test, coverage)))]
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyArray3, PyArray4};
 use pyo3::prelude::*;
 use smallvec::SmallVec;
 #[cfg(target_arch = "x86_64")]
@@ -87,6 +91,51 @@ pub struct PositionSamplingConfig {
     pub num_positions: u32,
     pub min_plies: u16,
     pub max_plies: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FeaturePerspective {
+    AbsoluteColor,
+    SideToMove,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FeatureConfig {
+    pub history_len: usize,
+    pub include_legal_mask: bool,
+    pub include_phase_plane: bool,
+    pub include_turn_plane: bool,
+    pub perspective: FeaturePerspective,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct EncodedPlanes {
+    pub channels: usize,
+    pub width: usize,
+    pub height: usize,
+    pub data_f32: Vec<f32>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct EncodedPlanesBatch {
+    pub batch: usize,
+    pub channels: usize,
+    pub width: usize,
+    pub height: usize,
+    pub data_f32: Vec<f32>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct EncodedFlatFeatures {
+    pub len: usize,
+    pub data_f32: Vec<f32>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct EncodedFlatFeaturesBatch {
+    pub batch: usize,
+    pub len: usize,
+    pub data_f32: Vec<f32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -506,6 +555,248 @@ pub fn sample_reachable_positions(seed: u64, config: &PositionSamplingConfig) ->
     }
 
     positions
+}
+
+fn feature_anchor_color(current: &Board, perspective: FeaturePerspective) -> Color {
+    match perspective {
+        FeaturePerspective::AbsoluteColor => Color::Black,
+        FeaturePerspective::SideToMove => current.side_to_move,
+    }
+}
+
+fn feature_frame_board(current: &Board, history: &[Board], frame_idx: usize) -> Option<Board> {
+    if frame_idx == 0 {
+        Some(*current)
+    } else {
+        history.get(frame_idx - 1).copied()
+    }
+}
+
+fn feature_plane_bits(board: &Board, anchor_color: Color) -> (u64, u64) {
+    match anchor_color {
+        Color::Black => (board.black_bits, board.white_bits),
+        Color::White => (board.white_bits, board.black_bits),
+    }
+}
+
+fn feature_plane_channels(config: &FeatureConfig) -> usize {
+    let mut channels = 2 * (1 + config.history_len);
+    if config.include_legal_mask {
+        channels += 1;
+    }
+    if config.include_phase_plane {
+        channels += 1;
+    }
+    if config.include_turn_plane {
+        channels += 1;
+    }
+    channels
+}
+
+fn feature_flat_len(config: &FeatureConfig) -> usize {
+    let mut len = 128 * (1 + config.history_len);
+    if config.include_legal_mask {
+        len += 64;
+    }
+    if config.include_phase_plane {
+        len += 1;
+    }
+    if config.include_turn_plane {
+        len += 1;
+    }
+    len
+}
+
+fn phase_value(board: &Board) -> f32 {
+    let plies = board.occupied_bits().count_ones().saturating_sub(4) as f32;
+    plies / 60.0
+}
+
+fn turn_value(board: &Board) -> f32 {
+    match board.side_to_move {
+        Color::Black => 1.0,
+        Color::White => 0.0,
+    }
+}
+
+fn write_bit_plane(dst: &mut [f32], bits: u64) {
+    let mut src = bits;
+    while src != 0 {
+        let square = src.trailing_zeros() as usize;
+        dst[square] = 1.0;
+        src &= src - 1;
+    }
+}
+
+fn write_scalar_plane(dst: &mut [f32], value: f32) {
+    dst.fill(value);
+}
+
+fn encode_planes_into(
+    dst: &mut [f32],
+    current: &Board,
+    history: &[Board],
+    config: &FeatureConfig,
+) -> EncodedPlanes {
+    let channels = feature_plane_channels(config);
+    let anchor_color = feature_anchor_color(current, config.perspective);
+    let mut channel_idx = 0usize;
+
+    for frame_idx in 0..=config.history_len {
+        if let Some(board) = feature_frame_board(current, history, frame_idx) {
+            let (first_bits, second_bits) = feature_plane_bits(&board, anchor_color);
+            write_bit_plane(
+                &mut dst[channel_idx * 64..(channel_idx + 1) * 64],
+                first_bits,
+            );
+            write_bit_plane(
+                &mut dst[(channel_idx + 1) * 64..(channel_idx + 2) * 64],
+                second_bits,
+            );
+        }
+        channel_idx += 2;
+    }
+
+    if config.include_legal_mask {
+        let legal = generate_legal_moves(current).bitmask;
+        write_bit_plane(&mut dst[channel_idx * 64..(channel_idx + 1) * 64], legal);
+        channel_idx += 1;
+    }
+
+    if config.include_phase_plane {
+        write_scalar_plane(
+            &mut dst[channel_idx * 64..(channel_idx + 1) * 64],
+            phase_value(current),
+        );
+        channel_idx += 1;
+    }
+
+    if config.include_turn_plane {
+        write_scalar_plane(
+            &mut dst[channel_idx * 64..(channel_idx + 1) * 64],
+            turn_value(current),
+        );
+    }
+
+    EncodedPlanes {
+        channels,
+        width: 8,
+        height: 8,
+        data_f32: dst.to_vec(),
+    }
+}
+
+pub fn encode_planes(current: &Board, history: &[Board], config: &FeatureConfig) -> EncodedPlanes {
+    let mut data = vec![0.0; feature_plane_channels(config) * 64];
+    encode_planes_into(&mut data, current, history, config)
+}
+
+pub fn encode_planes_batch(
+    boards: &[Board],
+    histories: &[Vec<Board>],
+    config: &FeatureConfig,
+) -> EncodedPlanesBatch {
+    let channels = feature_plane_channels(config);
+    let mut data = vec![0.0; boards.len() * channels * 64];
+
+    for (idx, board) in boards.iter().enumerate() {
+        let offset = idx * channels * 64;
+        let history = histories.get(idx).map(Vec::as_slice).unwrap_or(&[]);
+        encode_planes_into(
+            &mut data[offset..offset + channels * 64],
+            board,
+            history,
+            config,
+        );
+    }
+
+    EncodedPlanesBatch {
+        batch: boards.len(),
+        channels,
+        width: 8,
+        height: 8,
+        data_f32: data,
+    }
+}
+
+fn write_bit_vector(dst: &mut [f32], bits: u64) {
+    let mut src = bits;
+    while src != 0 {
+        let square = src.trailing_zeros() as usize;
+        dst[square] = 1.0;
+        src &= src - 1;
+    }
+}
+
+fn encode_flat_features_into(
+    dst: &mut [f32],
+    current: &Board,
+    history: &[Board],
+    config: &FeatureConfig,
+) -> EncodedFlatFeatures {
+    let anchor_color = feature_anchor_color(current, config.perspective);
+    let mut offset = 0usize;
+
+    for frame_idx in 0..=config.history_len {
+        if let Some(board) = feature_frame_board(current, history, frame_idx) {
+            let (first_bits, second_bits) = feature_plane_bits(&board, anchor_color);
+            write_bit_vector(&mut dst[offset..offset + 64], first_bits);
+            write_bit_vector(&mut dst[offset + 64..offset + 128], second_bits);
+        }
+        offset += 128;
+    }
+
+    if config.include_legal_mask {
+        write_bit_vector(
+            &mut dst[offset..offset + 64],
+            generate_legal_moves(current).bitmask,
+        );
+        offset += 64;
+    }
+
+    if config.include_phase_plane {
+        dst[offset] = phase_value(current);
+        offset += 1;
+    }
+
+    if config.include_turn_plane {
+        dst[offset] = turn_value(current);
+    }
+
+    EncodedFlatFeatures {
+        len: dst.len(),
+        data_f32: dst.to_vec(),
+    }
+}
+
+pub fn encode_flat_features(
+    current: &Board,
+    history: &[Board],
+    config: &FeatureConfig,
+) -> EncodedFlatFeatures {
+    let mut data = vec![0.0; feature_flat_len(config)];
+    encode_flat_features_into(&mut data, current, history, config)
+}
+
+pub fn encode_flat_features_batch(
+    boards: &[Board],
+    histories: &[Vec<Board>],
+    config: &FeatureConfig,
+) -> EncodedFlatFeaturesBatch {
+    let len = feature_flat_len(config);
+    let mut data = vec![0.0; boards.len() * len];
+
+    for (idx, board) in boards.iter().enumerate() {
+        let offset = idx * len;
+        let history = histories.get(idx).map(Vec::as_slice).unwrap_or(&[]);
+        encode_flat_features_into(&mut data[offset..offset + len], board, history, config);
+    }
+
+    EncodedFlatFeaturesBatch {
+        batch: boards.len(),
+        len,
+        data_f32: data,
+    }
 }
 
 // 現在の手番に対応する石配置を player / opponent の並びで返す。
@@ -1409,6 +1700,34 @@ fn game_result_to_py_str(result: GameResult) -> &'static str {
     }
 }
 
+#[cfg(not(any(test, coverage)))]
+fn py_str_to_feature_perspective(value: &str) -> PyResult<FeaturePerspective> {
+    match value {
+        "absolute_color" => Ok(FeaturePerspective::AbsoluteColor),
+        "side_to_move" => Ok(FeaturePerspective::SideToMove),
+        _ => Err(pyo3::exceptions::PyValueError::new_err(
+            "perspective must be 'absolute_color' or 'side_to_move'",
+        )),
+    }
+}
+
+#[cfg(not(any(test, coverage)))]
+fn feature_config_from_parts(
+    history_len: usize,
+    include_legal_mask: bool,
+    include_phase_plane: bool,
+    include_turn_plane: bool,
+    perspective: &str,
+) -> PyResult<FeatureConfig> {
+    Ok(FeatureConfig {
+        history_len,
+        include_legal_mask,
+        include_phase_plane,
+        include_turn_plane,
+        perspective: py_str_to_feature_perspective(perspective)?,
+    })
+}
+
 fn symmetry_to_py_str(sym: Symmetry) -> &'static str {
     match sym {
         Symmetry::Identity => "identity",
@@ -1599,6 +1918,133 @@ fn sample_reachable_positions_parts_py(
     .collect()
 }
 
+#[pyfunction(name = "_encode_planes_parts")]
+#[cfg(not(any(test, coverage)))]
+#[allow(clippy::too_many_arguments)]
+fn encode_planes_parts_py<'py>(
+    py: Python<'py>,
+    board: &PyBoard,
+    history: Vec<PyBoard>,
+    history_len: usize,
+    include_legal_mask: bool,
+    include_phase_plane: bool,
+    include_turn_plane: bool,
+    perspective: &str,
+) -> PyResult<Bound<'py, PyArray3<f32>>> {
+    let config = feature_config_from_parts(
+        history_len,
+        include_legal_mask,
+        include_phase_plane,
+        include_turn_plane,
+        perspective,
+    )?;
+    let history_boards: Vec<Board> = history.into_iter().map(|board| board.inner).collect();
+    let encoded = encode_planes(&board.inner, &history_boards, &config);
+    let array = Array3::from_shape_vec(
+        (encoded.channels, encoded.height, encoded.width),
+        encoded.data_f32,
+    )
+    .expect("feature planes shape must be valid");
+    Ok(array.into_pyarray(py))
+}
+
+#[pyfunction(name = "_encode_planes_batch_parts")]
+#[cfg(not(any(test, coverage)))]
+#[allow(clippy::too_many_arguments)]
+fn encode_planes_batch_parts_py<'py>(
+    py: Python<'py>,
+    boards: Vec<PyBoard>,
+    histories: Vec<Vec<PyBoard>>,
+    history_len: usize,
+    include_legal_mask: bool,
+    include_phase_plane: bool,
+    include_turn_plane: bool,
+    perspective: &str,
+) -> PyResult<Bound<'py, PyArray4<f32>>> {
+    let config = feature_config_from_parts(
+        history_len,
+        include_legal_mask,
+        include_phase_plane,
+        include_turn_plane,
+        perspective,
+    )?;
+    let rust_boards: Vec<Board> = boards.into_iter().map(|board| board.inner).collect();
+    let rust_histories: Vec<Vec<Board>> = histories
+        .into_iter()
+        .map(|history| history.into_iter().map(|board| board.inner).collect())
+        .collect();
+    let encoded = encode_planes_batch(&rust_boards, &rust_histories, &config);
+    let array = Array4::from_shape_vec(
+        (
+            encoded.batch,
+            encoded.channels,
+            encoded.height,
+            encoded.width,
+        ),
+        encoded.data_f32,
+    )
+    .expect("feature planes batch shape must be valid");
+    Ok(array.into_pyarray(py))
+}
+
+#[pyfunction(name = "_encode_flat_features_parts")]
+#[cfg(not(any(test, coverage)))]
+#[allow(clippy::too_many_arguments)]
+fn encode_flat_features_parts_py<'py>(
+    py: Python<'py>,
+    board: &PyBoard,
+    history: Vec<PyBoard>,
+    history_len: usize,
+    include_legal_mask: bool,
+    include_phase_plane: bool,
+    include_turn_plane: bool,
+    perspective: &str,
+) -> PyResult<Bound<'py, PyArray1<f32>>> {
+    let config = feature_config_from_parts(
+        history_len,
+        include_legal_mask,
+        include_phase_plane,
+        include_turn_plane,
+        perspective,
+    )?;
+    let history_boards: Vec<Board> = history.into_iter().map(|board| board.inner).collect();
+    let encoded = encode_flat_features(&board.inner, &history_boards, &config);
+    let array = Array1::from_shape_vec(encoded.len, encoded.data_f32)
+        .expect("flat feature shape must be valid");
+    Ok(array.into_pyarray(py))
+}
+
+#[pyfunction(name = "_encode_flat_features_batch_parts")]
+#[cfg(not(any(test, coverage)))]
+#[allow(clippy::too_many_arguments)]
+fn encode_flat_features_batch_parts_py<'py>(
+    py: Python<'py>,
+    boards: Vec<PyBoard>,
+    histories: Vec<Vec<PyBoard>>,
+    history_len: usize,
+    include_legal_mask: bool,
+    include_phase_plane: bool,
+    include_turn_plane: bool,
+    perspective: &str,
+) -> PyResult<Bound<'py, PyArray2<f32>>> {
+    let config = feature_config_from_parts(
+        history_len,
+        include_legal_mask,
+        include_phase_plane,
+        include_turn_plane,
+        perspective,
+    )?;
+    let rust_boards: Vec<Board> = boards.into_iter().map(|board| board.inner).collect();
+    let rust_histories: Vec<Vec<Board>> = histories
+        .into_iter()
+        .map(|history| history.into_iter().map(|board| board.inner).collect())
+        .collect();
+    let encoded = encode_flat_features_batch(&rust_boards, &rust_histories, &config);
+    let array = Array2::from_shape_vec((encoded.batch, encoded.len), encoded.data_f32)
+        .expect("flat feature batch shape must be valid");
+    Ok(array.into_pyarray(py))
+}
+
 #[pyfunction(name = "generate_legal_moves")]
 fn generate_legal_moves_py(board: &PyBoard) -> u64 {
     generate_legal_moves(&board.inner).bitmask
@@ -1702,6 +2148,17 @@ fn _core(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
         sample_reachable_positions_parts_py,
         module
     )?)?;
+    #[cfg(not(any(test, coverage)))]
+    module.add_function(wrap_pyfunction!(encode_planes_parts_py, module)?)?;
+    #[cfg(not(any(test, coverage)))]
+    module.add_function(wrap_pyfunction!(encode_planes_batch_parts_py, module)?)?;
+    #[cfg(not(any(test, coverage)))]
+    module.add_function(wrap_pyfunction!(encode_flat_features_parts_py, module)?)?;
+    #[cfg(not(any(test, coverage)))]
+    module.add_function(wrap_pyfunction!(
+        encode_flat_features_batch_parts_py,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(validate_board, module)?)?;
     module.add_function(wrap_pyfunction!(generate_legal_moves_py, module)?)?;
     module.add_function(wrap_pyfunction!(legal_moves_list, module)?)?;
@@ -1722,16 +2179,18 @@ fn _core(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
 mod tests {
     use super::{
         BB_H2VLINE, BB_SEED, Board, BoardBackend, BoardError, BoardStatus, Color, D4, D5,
-        DiscCount, E4, E5, FlipBackend, GameResult, LegalMoves, Move, MoveError, MovegenBackend,
-        OrientedBoard, PackedBoard, PerftError, PerftMode, PositionSamplingConfig,
-        RandomPlayConfig, SimdPreference, Symmetry, XorShift64Star, all_symmetries,
-        apply_forced_pass, apply_move, apply_move_unchecked, board_status, board_with_side_to_move,
-        disc_count, final_margin_from_black, final_margin_from_side_to_move, flips_for_move,
-        flips_for_move_bits_scan, game_result, generate_legal_moves, horizontal_seed,
-        is_legal_move, legal_moves_bitmask_generic, legal_moves_to_vec, pack_board,
-        parse_simd_preference, perft, perft_with_mode_oriented, play_random_game,
-        play_random_game_from_board_with_rng, read_h2vline, sample_reachable_positions,
-        selected_flip_backend, transform_board, transform_square, unpack_board,
+        DiscCount, E4, E5, FeatureConfig, FeaturePerspective, FlipBackend, GameResult, LegalMoves,
+        Move, MoveError, MovegenBackend, OrientedBoard, PackedBoard, PerftError, PerftMode,
+        PositionSamplingConfig, RandomPlayConfig, SimdPreference, Symmetry, XorShift64Star,
+        all_symmetries, apply_forced_pass, apply_move, apply_move_unchecked, board_status,
+        board_with_side_to_move, disc_count, encode_flat_features, encode_flat_features_batch,
+        encode_planes, encode_planes_batch, final_margin_from_black,
+        final_margin_from_side_to_move, flips_for_move, flips_for_move_bits_scan, game_result,
+        generate_legal_moves, horizontal_seed, is_legal_move, legal_moves_bitmask_generic,
+        legal_moves_to_vec, pack_board, parse_simd_preference, perft, perft_with_mode_oriented,
+        play_random_game, play_random_game_from_board_with_rng, read_h2vline,
+        sample_reachable_positions, selected_flip_backend, transform_board, transform_square,
+        unpack_board,
     };
     use rayon::prelude::*;
 
@@ -1743,6 +2202,16 @@ mod tests {
     // 0 始まりの file/rank から盤面インデックスへ変換する。
     fn square(file: u8, rank: u8) -> u8 {
         rank * 8 + file
+    }
+
+    fn default_feature_config() -> FeatureConfig {
+        FeatureConfig {
+            history_len: 0,
+            include_legal_mask: false,
+            include_phase_plane: false,
+            include_turn_plane: false,
+            perspective: FeaturePerspective::AbsoluteColor,
+        }
     }
 
     // テスト側の基準値として使う素朴な合法手生成を実装する。
@@ -2580,6 +3049,144 @@ mod tests {
             let plies = u16::from(counts.black + counts.white) - 4;
             assert!(config.min_plies <= plies && plies <= config.max_plies);
         }
+    }
+
+    #[test]
+    fn encode_planes_reports_expected_shape() {
+        let config = FeatureConfig {
+            history_len: 2,
+            include_legal_mask: true,
+            include_phase_plane: true,
+            include_turn_plane: true,
+            perspective: FeaturePerspective::AbsoluteColor,
+        };
+        let encoded = encode_planes(&Board::new_initial(), &[], &config);
+
+        assert_eq!(encoded.channels, 9);
+        assert_eq!(encoded.width, 8);
+        assert_eq!(encoded.height, 8);
+        assert_eq!(encoded.data_f32.len(), 9 * 64);
+    }
+
+    #[test]
+    fn encode_flat_features_reports_expected_shape() {
+        let config = FeatureConfig {
+            history_len: 2,
+            include_legal_mask: true,
+            include_phase_plane: true,
+            include_turn_plane: true,
+            perspective: FeaturePerspective::AbsoluteColor,
+        };
+        let encoded = encode_flat_features(&Board::new_initial(), &[], &config);
+
+        assert_eq!(encoded.len, 128 * 3 + 64 + 1 + 1);
+        assert_eq!(encoded.data_f32.len(), encoded.len);
+    }
+
+    #[test]
+    fn encode_feature_batches_match_single_position_encoders() {
+        let board_a = Board::new_initial();
+        let board_b = apply_move(&board_a, Move { square: 19 }).expect("move must succeed");
+        let config = FeatureConfig {
+            history_len: 1,
+            include_legal_mask: true,
+            include_phase_plane: false,
+            include_turn_plane: true,
+            perspective: FeaturePerspective::AbsoluteColor,
+        };
+        let planes_a = encode_planes(&board_a, &[board_b], &config);
+        let planes_b = encode_planes(&board_b, &[board_a], &config);
+        let flat_a = encode_flat_features(&board_a, &[board_b], &config);
+        let flat_b = encode_flat_features(&board_b, &[board_a], &config);
+
+        let planes_batch = encode_planes_batch(
+            &[board_a, board_b],
+            &[vec![board_b], vec![board_a]],
+            &config,
+        );
+        let flat_batch = encode_flat_features_batch(
+            &[board_a, board_b],
+            &[vec![board_b], vec![board_a]],
+            &config,
+        );
+
+        let plane_stride = planes_a.data_f32.len();
+        assert_eq!(
+            &planes_batch.data_f32[0..plane_stride],
+            planes_a.data_f32.as_slice()
+        );
+        assert_eq!(
+            &planes_batch.data_f32[plane_stride..plane_stride * 2],
+            planes_b.data_f32.as_slice()
+        );
+
+        let flat_stride = flat_a.data_f32.len();
+        assert_eq!(
+            &flat_batch.data_f32[0..flat_stride],
+            flat_a.data_f32.as_slice()
+        );
+        assert_eq!(
+            &flat_batch.data_f32[flat_stride..flat_stride * 2],
+            flat_b.data_f32.as_slice()
+        );
+    }
+
+    #[test]
+    fn encode_planes_uses_newest_first_history_and_zero_fills_missing_slots() {
+        let current = Board::new_initial();
+        let history_newest = Board {
+            black_bits: bit(0),
+            white_bits: bit(1),
+            side_to_move: Color::Black,
+        };
+        let history_older = Board {
+            black_bits: bit(2),
+            white_bits: bit(3),
+            side_to_move: Color::White,
+        };
+        let config = FeatureConfig {
+            history_len: 3,
+            ..default_feature_config()
+        };
+        let encoded = encode_planes(&current, &[history_newest, history_older], &config);
+
+        assert_eq!(encoded.data_f32[E4 as usize], 1.0);
+        assert_eq!(encoded.data_f32[64 + D4 as usize], 1.0);
+        assert_eq!(encoded.data_f32[128], 1.0);
+        assert_eq!(encoded.data_f32[193], 1.0);
+        assert_eq!(encoded.data_f32[258], 1.0);
+        assert_eq!(encoded.data_f32[323], 1.0);
+        assert!(encoded.data_f32[384..512].iter().all(|&value| value == 0.0));
+    }
+
+    #[test]
+    fn encode_features_reflect_side_to_move_perspective() {
+        let board = Board {
+            black_bits: bit(0),
+            white_bits: bit(1),
+            side_to_move: Color::White,
+        };
+        let absolute = encode_planes(
+            &board,
+            &[],
+            &FeatureConfig {
+                perspective: FeaturePerspective::AbsoluteColor,
+                ..default_feature_config()
+            },
+        );
+        let relative = encode_planes(
+            &board,
+            &[],
+            &FeatureConfig {
+                perspective: FeaturePerspective::SideToMove,
+                ..default_feature_config()
+            },
+        );
+
+        assert_eq!(absolute.data_f32[0], 1.0);
+        assert_eq!(absolute.data_f32[64 + 1], 1.0);
+        assert_eq!(relative.data_f32[1], 1.0);
+        assert_eq!(relative.data_f32[64], 1.0);
     }
 
     #[test]

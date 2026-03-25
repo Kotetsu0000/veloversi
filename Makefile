@@ -21,7 +21,7 @@ format:
 check: format lint test
 
 mutants:
-	cargo mutants --file src/lib.rs
+	cargo mutants --file src/lib.rs -j 8
 
 coverage:
 	cargo llvm-cov --html
