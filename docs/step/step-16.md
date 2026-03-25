@@ -60,15 +60,15 @@ Step 16 では、配布用 workflow を追加し、主要 OS / arch 向け artif
 
 ## 受け入れ条件
 
-- [ ] release 専用 workflow が追加されている
-- [ ] タグ push で起動する設定になっている
-- [ ] Linux / macOS / Windows 向け wheel が生成対象に入っている
-- [ ] Linux `aarch64` と macOS `arm64` が matrix に含まれている
-- [ ] sdist が生成対象に入っている
-- [ ] GitHub Release へ artifact を upload する構成になっている
-- [ ] Python version 検証 matrix が `3.12`, `3.13`, `3.14` を持っている
-- [ ] 新しい Python minor version を追記しやすい形になっている
-- [ ] `make check` が成功する
+- [x] release 専用 workflow が追加されている
+- [x] タグ push で起動する設定になっている
+- [x] Linux / macOS / Windows 向け wheel が生成対象に入っている
+- [x] Linux `aarch64` と macOS `arm64` が matrix に含まれている
+- [x] sdist が生成対象に入っている
+- [x] GitHub Release へ artifact を upload する構成になっている
+- [x] Python version 検証 matrix が `3.12`, `3.13`, `3.14` を持っている
+- [x] 新しい Python minor version を追記しやすい形になっている
+- [x] `make check` が成功する
 
 ## 実装開始時点の不足
 
@@ -124,3 +124,27 @@ Step 16 では、配布用 workflow を追加し、主要 OS / arch 向け artif
 
 今後 `ref` AI を optional build にしたい方針があるため、その前に release 導線を固めておく方が build 戦略を組み込みやすい。
 また、ローカル install 可能な段階で release workflow を先に整える方が、配布観点の問題を早く表面化できる。
+
+## 実装結果
+
+- [release.yml](/home/kotetsu0000/program/veloversi/.github/workflows/release.yml) を追加した
+- tag push (`v*`) と `workflow_dispatch` で起動する release workflow を定義した
+- wheel build matrix は Linux `x86_64` / `aarch64`、macOS `x86_64` / `arm64`、Windows `x86_64` を対象にした
+- macOS は universal2 を使わず、`x86_64` と `arm64` の別 wheel とした
+- Python version 検証 matrix は `3.12`, `3.13`, `3.14` を対象にした
+- Linux `x86_64` wheel を使った install / import smoke test job を追加した
+- GitHub Release への artifact upload を追加した
+- [README.md](/home/kotetsu0000/program/veloversi/README.md) に release artifact の説明を追記した
+
+## 検証結果
+
+- `make check`: 成功
+  - Rust: `89 passed; 0 failed; 6 ignored`
+  - Python: `28 passed`
+- workflow はローカルでタグ push 実行まではしていない
+- YAML の外部 lint は、この環境では `ruby` が無く未実施
+
+## 残課題
+
+- release workflow 自体の実運転確認は、実タグ push か `workflow_dispatch` 実行で別途確認する
+- `ref` AI feature を将来追加する場合は、この workflow の build command / matrix に feature 分岐を足す

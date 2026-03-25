@@ -1,0 +1,154 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  PYTHON_VERSIONS: '["3.12", "3.13", "3.14"]'
+
+jobs:
+  build-wheels:
+    name: Build wheel (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-latest
+          - name: linux-aarch64
+            runner: ubuntu-24.04-arm
+          - name: macos-x86_64
+            runner: macos-15-intel
+          - name: macos-arm64
+            runner: macos-15
+          - name: windows-x86_64
+            runner: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: latest
+
+      - name: Sync dependencies
+        run: uv sync --group dev
+
+      - name: Build wheel
+        run: uv run maturin build --release --out dist
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.name }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  build-sdist:
+    name: Build sdist
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: latest
+
+      - name: Sync dependencies
+        run: uv sync --group dev
+
+      - name: Build sdist
+        run: uv run maturin sdist --out dist
+
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  verify-python:
+    name: Verify abi3 wheel (Python ${{ matrix.python-version }})
+    needs: build-wheels
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ${{ fromJSON(env.PYTHON_VERSIONS) }}
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Download Linux x86_64 wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: wheels-linux-x86_64
+          path: dist
+
+      - name: Install wheel
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install dist/*.whl
+
+      - name: Smoke test
+        run: |
+          python - <<'PY'
+          import veloversi
+
+          board = veloversi.initial_board()
+          assert veloversi.legal_moves_list(board) == [19, 26, 37, 44]
+          assert veloversi.pack_board(board) == (34628173824, 68853694464, "black")
+          assert veloversi.transform_square(19, "rot90") == 29
+          PY
+
+  publish-release:
+    name: Publish GitHub Release assets
+    if: startsWith(github.ref, 'refs/tags/')
+    needs:
+      - build-wheels
+      - build-sdist
+      - verify-python
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-dist
+          merge-multiple: true
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-dist/*
+          generate_release_notes: true

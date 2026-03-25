@@ -129,6 +129,19 @@ flat は shape が単一局面で `(F,)`、batch で `(B, F)` です。
 uv run maturin develop
 ```
 
+## Release artifact
+
+バージョンタグ (`v*`) を push すると、GitHub Actions の release workflow が GitHub Release 向け artifact を生成します。
+
+- wheel
+  - Linux: `x86_64`, `aarch64`
+  - macOS: `x86_64`, `arm64`
+  - Windows: `x86_64`
+- sdist
+
+`abi3` wheel を使っているため、配布 artifact は OS / arch 中心です。
+一方で、workflow 内では Python `3.12`, `3.13`, `3.14` の install / import smoke test を別 matrix で実行します。
+
 ## 一時的な疎通確認テスト
 
 Step 01 では、検証基盤が機能することを確認するための最小テストを Rust / Python に追加しています。
