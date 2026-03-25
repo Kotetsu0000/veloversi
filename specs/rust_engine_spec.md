@@ -614,6 +614,33 @@ pub fn unpack_board(packed: PackedBoard) -> Result<Board, BoardError>
 
 ### 5.8 random_play モジュール
 
+```rust
+pub struct RandomPlayConfig {
+    pub max_plies: Option<u16>,
+}
+
+pub struct RandomGameTrace {
+    pub boards: Vec<Board>,
+    pub moves: Vec<Option<Move>>,
+    pub final_result: GameResult,
+    pub final_margin_from_black: i8,
+    pub plies_played: u16,
+    pub reached_terminal: bool,
+}
+
+pub struct PositionSamplingConfig {
+    pub num_positions: u32,
+    pub min_plies: u16,
+    pub max_plies: u16,
+}
+```
+
+説明:
+- `RandomGameTrace` はランダム対局の途中局面列と着手列、および終局ラベルを保持する
+- `moves` ではパスを `None` で表す
+- `max_plies = None` は終局まで進める
+- `max_plies = Some(n)` はトレース記録を最大 `n` plies で止めるが、`final_result` と `final_margin_from_black` は終局まで進めた結果を返す
+
 #### 5.8.1 `play_random_game`
 
 ```rust
@@ -772,6 +799,8 @@ def encode_planes(board: Board, history: list[Board], config: dict) -> numpy.nda
 def encode_nnue_features(board: Board) -> tuple[numpy.ndarray, numpy.ndarray]: ...
 def transform_board(board: Board, sym: str) -> Board: ...
 def transform_square(square: int, sym: str) -> int: ...
+def play_random_game(seed: int, config: dict) -> dict: ...
+def sample_reachable_positions(seed: int, config: dict) -> list[Board]: ...
 def sample_reachable_positions(seed: int, config: dict) -> list[PyBoard]: ...
 def play_random_game(seed: int, config: dict) -> dict: ...
 def search_best_move(board: PyBoard, config: dict) -> dict: ...

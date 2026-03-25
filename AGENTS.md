@@ -6,3 +6,4 @@ Veloversiは、Rustで書かれた高速なオセロ/リバーシライブラリ
 
 - `specs/*.md`: 仕様書一覧。子のリポジトリへの実装は`specs/rust_engine_spec.md`を参照。
 - `ref`: 実装の参照コード。
+- `docs/step/todo.md`: 今後のステップで行う内容のTodoリスト。必ず更新する。

@@ -19,6 +19,8 @@ from veloversi import (
     is_legal_move,
     legal_moves_list,
     pack_board,
+    play_random_game,
+    sample_reachable_positions,
     transform_board,
     transform_square,
     unpack_board,
@@ -180,6 +182,73 @@ def test_pack_unpack_round_trip_and_fixed_initial_tuple() -> None:
     assert unpack_board(packed).to_bits() == moved.to_bits()
     assert core.pack_board(moved) == packed
     assert core._unpack_board_parts(*packed).to_bits() == moved.to_bits()
+
+
+def test_play_random_game_is_reproducible_and_returns_trace_dict() -> None:
+    lhs = play_random_game(123, {"max_plies": 10})
+    rhs = play_random_game(123, {"max_plies": 10})
+
+    assert lhs["moves"] == rhs["moves"]
+    assert lhs["final_result"] == rhs["final_result"]
+    assert lhs["final_margin_from_black"] == rhs["final_margin_from_black"]
+    assert lhs["plies_played"] == 10
+    assert lhs["reached_terminal"] is False
+    assert len(lhs["boards"]) == 11
+    assert all(isinstance(board, Board) for board in lhs["boards"])
+
+
+def test_play_random_game_trace_contains_only_legal_transitions() -> None:
+    trace = play_random_game(9, {"max_plies": 16})
+
+    assert len(trace["boards"]) == len(trace["moves"]) + 1
+    for idx, mv in enumerate(trace["moves"]):
+        board = trace["boards"][idx]
+        next_board = trace["boards"][idx + 1]
+        if mv is None:
+            assert board_status(board) == "forced_pass"
+            assert apply_forced_pass(board).to_bits() == next_board.to_bits()
+        else:
+            assert is_legal_move(board, mv)
+            assert apply_move(board, mv).to_bits() == next_board.to_bits()
+
+
+def test_play_random_game_final_label_matches_unbounded_rollout() -> None:
+    full = play_random_game(77, {"max_plies": None})
+    truncated = play_random_game(77, {"max_plies": 8})
+
+    assert full["final_result"] == truncated["final_result"]
+    assert full["final_margin_from_black"] == truncated["final_margin_from_black"]
+
+
+def test_sample_reachable_positions_returns_boards() -> None:
+    positions = sample_reachable_positions(5, {"num_positions": 6, "min_plies": 4, "max_plies": 8})
+
+    assert len(positions) == 6
+    assert all(isinstance(board, Board) for board in positions)
+    for board in positions:
+        black, white, _empty = disc_count(board)
+        plies = black + white - 4
+        assert 4 <= plies <= 8
+
+
+def test_random_play_public_api_rejects_invalid_config() -> None:
+    with pytest.raises(ValueError, match="config"):
+        play_random_game(1, [])  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="max_plies"):
+        play_random_game(1, {"max_plies": -1})
+
+    with pytest.raises(ValueError, match="config"):
+        sample_reachable_positions(1, [])  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="num_positions"):
+        sample_reachable_positions(1, {"num_positions": -1, "min_plies": 0, "max_plies": 1})
+
+    with pytest.raises(ValueError, match="min_plies"):
+        sample_reachable_positions(1, {"num_positions": 1, "min_plies": -1, "max_plies": 1})
+
+    with pytest.raises(ValueError, match="min_plies must be less than or equal to max_plies"):
+        sample_reachable_positions(1, {"num_positions": 1, "min_plies": 3, "max_plies": 1})
 
 
 @pytest.mark.parametrize(
