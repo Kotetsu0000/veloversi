@@ -3,6 +3,7 @@ use crate::engine::{
     final_margin_from_side_to_move, generate_legal_moves, legal_moves_to_vec,
 };
 use crate::search_eval_data::{FEATURE_CELL_COUNTS, FEATURE_TO_PATTERN, FEATURE_TO_SQUARES};
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
 const SCORE_MAX: i16 = 64;
@@ -81,6 +82,7 @@ struct SearchState {
     searched_nodes: u64,
     max_nodes: Option<u64>,
     exact_solver_empty_threshold: Option<u8>,
+    transposition_table: Option<TranspositionTable>,
 }
 
 struct EvalTables {
@@ -88,6 +90,41 @@ struct EvalTables {
     pattern_offsets: [usize; 16],
     pattern_phase_span: usize,
     phase_stride: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct BoardKey {
+    black_bits: u64,
+    white_bits: u64,
+    black_to_move: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BoundKind {
+    Exact,
+    Lower,
+    Upper,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TranspositionEntry {
+    depth: u8,
+    bound: BoundKind,
+    score: i16,
+    best_move: Option<Move>,
+    is_exact: bool,
+}
+
+#[derive(Default)]
+struct TranspositionTable {
+    entries: HashMap<BoardKey, TranspositionEntry>,
+}
+
+#[derive(Clone, Copy)]
+struct OrderedMove {
+    mv: Move,
+    next: Board,
+    is_immediate_win: bool,
 }
 
 pub fn can_solve_exact(board: &Board, config: &SolveConfig) -> bool {
@@ -110,11 +147,7 @@ pub fn solve_exact(board: &Board, config: &SolveConfig) -> Result<SolveResult, S
 }
 
 pub fn search_best_move(board: &Board, config: &SearchConfig) -> SearchResult {
-    let _ = (
-        config.time_limit_ms,
-        config.use_transposition_table,
-        config.multi_pv,
-    );
+    let _ = (config.time_limit_ms, config.multi_pv);
 
     if let Some(threshold) = config.exact_solver_empty_threshold {
         let exact_config = SolveConfig {
@@ -165,6 +198,9 @@ pub fn search_best_move(board: &Board, config: &SearchConfig) -> SearchResult {
                     searched_nodes: 0,
                     max_nodes: config.max_nodes,
                     exact_solver_empty_threshold: config.exact_solver_empty_threshold,
+                    transposition_table: config
+                        .use_transposition_table
+                        .then(TranspositionTable::default),
                 };
                 let passed = apply_forced_pass(board).expect("forced pass must succeed");
                 let line = nega_scout(
@@ -193,25 +229,46 @@ pub fn search_best_move(board: &Board, config: &SearchConfig) -> SearchResult {
         searched_nodes: 1,
         max_nodes: config.max_nodes,
         exact_solver_empty_threshold: config.exact_solver_empty_threshold,
+        transposition_table: config
+            .use_transposition_table
+            .then(TranspositionTable::default),
     };
-    let moves = legal_moves_to_vec(legal);
+    let mut tt_move = None;
+    if let Some(table) = state.transposition_table.as_ref() {
+        tt_move = table.best_move_for(board);
+    }
+    let moves = ordered_moves(board, legal, tt_move);
     let mut best_move = None;
     let mut best_score = i16::MIN;
     let mut best_pv = Vec::new();
     let mut alpha = -SCORE_INF;
     let beta = SCORE_INF;
     let mut best_exact = true;
+    let original_alpha = alpha;
 
-    for (idx, mv) in moves.into_iter().enumerate() {
+    for (idx, ordered) in moves.into_iter().enumerate() {
         if state.node_limit_reached() && best_move.is_some() {
             break;
         }
-        let next = apply_move_unchecked(board, mv);
-        let child = if idx == 0 {
-            nega_scout(&next, requested_depth - 1, -beta, -alpha, false, &mut state)
+        let child = if ordered.is_immediate_win {
+            SearchLine {
+                best_move: None,
+                best_score: -SCORE_MAX,
+                pv: Vec::new(),
+                is_exact: true,
+            }
+        } else if idx == 0 {
+            nega_scout(
+                &ordered.next,
+                requested_depth - 1,
+                -beta,
+                -alpha,
+                false,
+                &mut state,
+            )
         } else {
             let mut probe = nega_scout(
-                &next,
+                &ordered.next,
                 requested_depth - 1,
                 -(alpha + 1),
                 -alpha,
@@ -220,20 +277,44 @@ pub fn search_best_move(board: &Board, config: &SearchConfig) -> SearchResult {
             );
             let probe_score = -probe.best_score;
             if probe_score > alpha && probe_score < beta {
-                probe = nega_scout(&next, requested_depth - 1, -beta, -alpha, false, &mut state);
+                probe = nega_scout(
+                    &ordered.next,
+                    requested_depth - 1,
+                    -beta,
+                    -alpha,
+                    false,
+                    &mut state,
+                );
             }
             probe
         };
         let score = -child.best_score;
         if score > best_score {
-            best_move = Some(mv);
+            best_move = Some(ordered.mv);
             best_score = score;
             best_exact = child.is_exact;
             best_pv.clear();
-            best_pv.push(mv);
+            best_pv.push(ordered.mv);
             best_pv.extend(child.pv);
         }
         alpha = alpha.max(score);
+        if alpha >= beta {
+            break;
+        }
+    }
+
+    if let Some(table) = state.transposition_table.as_mut() {
+        let bound = determine_bound(best_score, original_alpha, beta);
+        table.store(
+            board,
+            TranspositionEntry {
+                depth: requested_depth,
+                bound,
+                score: best_score,
+                best_move,
+                is_exact: best_exact,
+            },
+        );
     }
 
     SearchResult {
@@ -331,6 +412,37 @@ fn nega_scout(
         };
     }
 
+    let original_alpha = alpha;
+    let original_beta = beta;
+    let mut beta_bound = beta;
+    let tt_key = BoardKey::new(board);
+    let mut tt_move = None;
+    if let Some(table) = state.transposition_table.as_ref()
+        && let Some(entry) = table.lookup(tt_key, depth)
+    {
+        tt_move = entry.best_move;
+        match entry.bound {
+            BoundKind::Exact => {
+                return SearchLine {
+                    best_move: entry.best_move,
+                    best_score: entry.score,
+                    pv: entry.best_move.into_iter().collect(),
+                    is_exact: entry.is_exact,
+                };
+            }
+            BoundKind::Lower => alpha = alpha.max(entry.score),
+            BoundKind::Upper => beta_bound = beta_bound.min(entry.score),
+        }
+        if alpha >= beta_bound {
+            return SearchLine {
+                best_move: entry.best_move,
+                best_score: entry.score,
+                pv: entry.best_move.into_iter().collect(),
+                is_exact: entry.is_exact,
+            };
+        }
+    }
+
     let legal = generate_legal_moves(board);
     if legal.count == 0 {
         return match board_status(board) {
@@ -372,37 +484,44 @@ fn nega_scout(
         };
     }
 
-    let moves = legal_moves_to_vec(legal);
+    let moves = ordered_moves(board, legal, tt_move);
     let mut best_move = None;
     let mut best_score = i16::MIN;
     let mut best_pv = Vec::new();
     let mut best_exact = true;
 
-    for (idx, mv) in moves.into_iter().enumerate() {
-        let next = apply_move_unchecked(board, mv);
-        let child = if idx == 0 {
-            nega_scout(&next, depth - 1, -beta, -alpha, false, state)
+    for (idx, ordered) in moves.into_iter().enumerate() {
+        let child = if ordered.is_immediate_win {
+            SearchLine {
+                best_move: None,
+                best_score: -SCORE_MAX,
+                pv: Vec::new(),
+                is_exact: true,
+            }
+        } else if idx == 0 {
+            nega_scout(&ordered.next, depth - 1, -beta_bound, -alpha, false, state)
         } else {
-            let mut probe = nega_scout(&next, depth - 1, -(alpha + 1), -alpha, false, state);
+            let mut probe =
+                nega_scout(&ordered.next, depth - 1, -(alpha + 1), -alpha, false, state);
             let probe_score = -probe.best_score;
-            if probe_score > alpha && probe_score < beta {
-                probe = nega_scout(&next, depth - 1, -beta, -alpha, false, state);
+            if probe_score > alpha && probe_score < beta_bound {
+                probe = nega_scout(&ordered.next, depth - 1, -beta_bound, -alpha, false, state);
             }
             probe
         };
         let score = -child.best_score;
         if score > best_score {
-            best_move = Some(mv);
+            best_move = Some(ordered.mv);
             best_score = score;
             best_exact = child.is_exact;
             best_pv.clear();
-            best_pv.push(mv);
+            best_pv.push(ordered.mv);
             best_pv.extend(child.pv);
         }
         if score > alpha {
             alpha = score;
         }
-        if alpha >= beta {
+        if alpha >= beta_bound {
             break;
         }
         if state.node_limit_reached() {
@@ -410,12 +529,25 @@ fn nega_scout(
         }
     }
 
-    SearchLine {
+    let line = SearchLine {
         best_move,
         best_score,
         pv: best_pv,
         is_exact: best_exact,
+    };
+    if let Some(table) = state.transposition_table.as_mut() {
+        table.store(
+            board,
+            TranspositionEntry {
+                depth,
+                bound: determine_bound(line.best_score, original_alpha, original_beta),
+                score: line.best_score,
+                best_move: line.best_move,
+                is_exact: line.is_exact,
+            },
+        );
     }
+    line
 }
 
 fn leaf_score(board: &Board) -> i16 {
@@ -426,6 +558,47 @@ fn leaf_score(board: &Board) -> i16 {
             -leaf_score(&passed)
         }
         BoardStatus::Ongoing => mid_evaluate_diff(board),
+    }
+}
+
+fn ordered_moves(
+    board: &Board,
+    legal: crate::engine::LegalMoves,
+    tt_move: Option<Move>,
+) -> Vec<OrderedMove> {
+    let mut ordered = Vec::with_capacity(legal.count as usize);
+    for mv in legal_moves_to_vec(legal) {
+        let next = apply_move_unchecked(board, mv);
+        let is_immediate_win = matches!(board_status(&next), BoardStatus::Terminal)
+            && -final_margin_from_side_to_move(&next) == SCORE_MAX as i8;
+        ordered.push(OrderedMove {
+            mv,
+            next,
+            is_immediate_win,
+        });
+    }
+    ordered.sort_by_key(|candidate| {
+        let is_tt = tt_move == Some(candidate.mv);
+        (
+            !is_immediate_win_priority(candidate, is_tt),
+            !is_tt,
+            candidate.mv.square,
+        )
+    });
+    ordered
+}
+
+fn is_immediate_win_priority(candidate: &OrderedMove, is_tt_move: bool) -> bool {
+    candidate.is_immediate_win || is_tt_move
+}
+
+fn determine_bound(score: i16, alpha: i16, beta: i16) -> BoundKind {
+    if score <= alpha {
+        BoundKind::Upper
+    } else if score >= beta {
+        BoundKind::Lower
+    } else {
+        BoundKind::Exact
     }
 }
 
@@ -543,6 +716,43 @@ impl EvalTables {
     fn eval_num_value(&self, phase_idx: usize, player_count: usize) -> i16 {
         let index = phase_idx * self.phase_stride + self.pattern_phase_span + player_count;
         self.raw[index]
+    }
+}
+
+impl BoardKey {
+    fn new(board: &Board) -> Self {
+        Self {
+            black_bits: board.black_bits,
+            white_bits: board.white_bits,
+            black_to_move: matches!(board.side_to_move, crate::engine::Color::Black),
+        }
+    }
+}
+
+impl TranspositionTable {
+    fn lookup(&self, key: BoardKey, depth: u8) -> Option<TranspositionEntry> {
+        self.entries
+            .get(&key)
+            .copied()
+            .filter(|entry| entry.depth >= depth)
+    }
+
+    fn best_move_for(&self, board: &Board) -> Option<Move> {
+        self.entries
+            .get(&BoardKey::new(board))
+            .and_then(|entry| entry.best_move)
+    }
+
+    fn store(&mut self, board: &Board, entry: TranspositionEntry) {
+        let key = BoardKey::new(board);
+        match self.entries.get(&key).copied() {
+            Some(existing)
+                if existing.depth > entry.depth
+                    || (existing.depth == entry.depth && existing.bound == BoundKind::Exact) => {}
+            _ => {
+                self.entries.insert(key, entry);
+            }
+        }
     }
 }
 
@@ -825,6 +1035,71 @@ mod tests {
         assert_eq!(result.best_move, expected.0);
         assert_eq!(result.best_score, expected.1);
         assert_eq!(result.reached_depth, 2);
+    }
+
+    #[test]
+    fn search_best_move_matches_with_and_without_transposition_table() {
+        let board = Board::new_initial();
+        let without_tt = search_best_move(
+            &board,
+            &SearchConfig {
+                max_depth: Some(4),
+                max_nodes: None,
+                time_limit_ms: None,
+                exact_solver_empty_threshold: None,
+                use_transposition_table: false,
+                multi_pv: 1,
+            },
+        );
+        let with_tt = search_best_move(
+            &board,
+            &SearchConfig {
+                max_depth: Some(4),
+                max_nodes: None,
+                time_limit_ms: None,
+                exact_solver_empty_threshold: None,
+                use_transposition_table: true,
+                multi_pv: 1,
+            },
+        );
+
+        assert_eq!(with_tt.best_move, without_tt.best_move);
+        assert_eq!(with_tt.best_score, without_tt.best_score);
+        assert_eq!(with_tt.score_kind, without_tt.score_kind);
+        assert_eq!(with_tt.is_exact, without_tt.is_exact);
+        assert!(with_tt.searched_nodes <= without_tt.searched_nodes);
+    }
+
+    #[test]
+    fn transposition_table_does_not_change_exact_threshold_path() {
+        let board = pick_multi_move_endgame_board();
+        let without_tt = search_best_move(
+            &board,
+            &SearchConfig {
+                max_depth: Some(4),
+                max_nodes: None,
+                time_limit_ms: None,
+                exact_solver_empty_threshold: Some(6),
+                use_transposition_table: false,
+                multi_pv: 1,
+            },
+        );
+        let with_tt = search_best_move(
+            &board,
+            &SearchConfig {
+                max_depth: Some(4),
+                max_nodes: None,
+                time_limit_ms: None,
+                exact_solver_empty_threshold: Some(6),
+                use_transposition_table: true,
+                multi_pv: 1,
+            },
+        );
+
+        assert_eq!(with_tt.best_move, without_tt.best_move);
+        assert_eq!(with_tt.best_score, without_tt.best_score);
+        assert_eq!(with_tt.pv, without_tt.pv);
+        assert_eq!(with_tt.is_exact, without_tt.is_exact);
     }
 
     #[test]

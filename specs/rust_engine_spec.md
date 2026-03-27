@@ -755,9 +755,12 @@ pub struct SearchConfig {
 
 説明:
 - 探索停止条件と補助機能の設定
-- Step 18 時点では `max_depth` と `exact_solver_empty_threshold` を優先実装対象とし、
-  `max_nodes` は簡易打ち切りに使う
-- `time_limit_ms`、`use_transposition_table`、`multi_pv` は後続 step で `ref` 実装へ寄せる
+- Step 19 時点では次を実装対象としている
+  - `max_depth`
+  - `max_nodes`
+  - `exact_solver_empty_threshold`
+  - `use_transposition_table`
+- `time_limit_ms` と `multi_pv` は後続 step で `ref` 実装へ寄せる
 
 ### 6.2 SearchResult
 
