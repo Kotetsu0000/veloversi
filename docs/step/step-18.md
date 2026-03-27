@@ -111,10 +111,7 @@ Step 17 で exact/endgame 側の最小核は入ったため、次は midgame 探
 ## 実装結果
 
 - `src/search.rs` を復旧し、Step 17 の exact solver を維持したまま midgame 探索を追加した
-- `src/search_eval_data.rs` を追加し、`ref/Egaroucid/src/engine/evaluate_generic.hpp` の
-  `feature_to_coord` を Veloversi の square 番号へ変換した定数として保持した
-- `ref/Egaroucid/bin/resources/eval.egev2` は `include_bytes!` で埋め込み、
-  `OnceLock` で一度だけ展開して評価テーブルを初期化する構成にした
+- midgame 評価は独自実装へ切り替え、配布物に `ref` の外部評価データを含めない構成にした
 - Rust 公開 API として次を追加した
   - `SearchConfig`
   - `SearchResult`

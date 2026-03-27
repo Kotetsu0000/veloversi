@@ -2,22 +2,15 @@ use crate::engine::{
     Board, BoardStatus, Move, apply_forced_pass, apply_move_unchecked, board_status, disc_count,
     final_margin_from_side_to_move, generate_legal_moves, legal_moves_to_vec,
 };
-use crate::search_eval_data::{FEATURE_CELL_COUNTS, FEATURE_TO_PATTERN, FEATURE_TO_SQUARES};
 use std::collections::HashMap;
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 const SCORE_MAX: i16 = 64;
 const SCORE_INF: i16 = 127;
-const N_PHASES: usize = 60;
-const MAX_STONE_NUM: usize = 65;
-const STEP: i32 = 32;
-const STEP_2: i32 = 16;
-const N_ZEROS_PLUS: i16 = 1 << 12;
-const PATTERN_SIZES: [usize; 16] = [8, 9, 8, 9, 8, 9, 7, 10, 10, 10, 10, 10, 10, 10, 10, 10];
-const POW3: [usize; 11] = [1, 3, 9, 27, 81, 243, 729, 2187, 6561, 19683, 59049];
-
-static EVAL_TABLES: OnceLock<EvalTables> = OnceLock::new();
+const NOT_FILE_A: u64 = 0xFEFE_FEFE_FEFE_FEFE;
+const NOT_FILE_H: u64 = 0x7F7F_7F7F_7F7F_7F7F;
+const CORNER_MASK: u64 = 0x8100_0000_0000_0081;
+const EDGE_MASK: u64 = 0x7E81_8181_8181_817E;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SearchConfig {
@@ -86,13 +79,6 @@ struct SearchState {
     exact_solver_empty_threshold: Option<u8>,
     transposition_table: Option<TranspositionTable>,
     deadline: Option<Instant>,
-}
-
-struct EvalTables {
-    raw: Box<[i16]>,
-    pattern_offsets: [usize; 16],
-    pattern_phase_span: usize,
-    phase_stride: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -719,26 +705,54 @@ fn determine_bound(score: i16, alpha: i16, beta: i16) -> BoundKind {
 
 fn mid_evaluate_diff(board: &Board) -> i16 {
     let (player_bits, opponent_bits) = oriented_bits(board);
-    let tables = eval_tables();
-    let n_discs = (player_bits | opponent_bits).count_ones() as usize;
-    let phase_idx = (n_discs - 4).min(N_PHASES - 1);
-    let player_count = player_bits.count_ones() as usize;
-    let board_array = build_board_array(player_bits, opponent_bits);
+    let empty_bits = !(player_bits | opponent_bits);
+    let empty_count = empty_bits.count_ones() as u8;
 
-    let mut res = 0i32;
-    for feature_idx in 0..FEATURE_TO_SQUARES.len() {
-        let pattern_idx = FEATURE_TO_PATTERN[feature_idx];
-        let feature_value = pick_pattern_idx(
-            &board_array,
-            &FEATURE_TO_SQUARES[feature_idx],
-            FEATURE_CELL_COUNTS[feature_idx] as usize,
-        );
-        res += tables.pattern_value(phase_idx, pattern_idx, feature_value) as i32;
-    }
-    res += tables.eval_num_value(phase_idx, player_count) as i32;
-    res += if res >= 0 { STEP_2 } else { -STEP_2 };
-    let normalized = (res / STEP).clamp(-(SCORE_MAX as i32), SCORE_MAX as i32);
-    normalized as i16
+    let disc_diff = player_bits.count_ones() as i32 - opponent_bits.count_ones() as i32;
+    let mobility_diff = generate_legal_moves(board).count as i32
+        - generate_legal_moves(&opponent_board(board)).count as i32;
+    let potential_mobility_diff =
+        potential_mobility(opponent_bits, empty_bits) - potential_mobility(player_bits, empty_bits);
+    let frontier_diff =
+        frontier_count(opponent_bits, empty_bits) - frontier_count(player_bits, empty_bits);
+    let corner_diff = (player_bits & CORNER_MASK).count_ones() as i32
+        - (opponent_bits & CORNER_MASK).count_ones() as i32;
+    let edge_diff = (player_bits & EDGE_MASK).count_ones() as i32
+        - (opponent_bits & EDGE_MASK).count_ones() as i32;
+    let corner_closeness_diff = corner_closeness_penalty(player_bits, opponent_bits);
+    let parity_term = if empty_count.is_multiple_of(2) { -1 } else { 1 };
+
+    let disc_weight = match empty_count {
+        41..=60 => 0,
+        21..=40 => 2,
+        _ => 6,
+    };
+    let mobility_weight = match empty_count {
+        41..=60 => 10,
+        21..=40 => 7,
+        _ => 4,
+    };
+    let potential_weight = match empty_count {
+        41..=60 => 6,
+        21..=40 => 4,
+        _ => 2,
+    };
+    let frontier_weight = match empty_count {
+        41..=60 => 6,
+        21..=40 => 5,
+        _ => 3,
+    };
+
+    let raw = 24 * corner_diff
+        + 3 * edge_diff
+        + mobility_weight * mobility_diff
+        + potential_weight * potential_mobility_diff
+        + frontier_weight * frontier_diff
+        + disc_weight * disc_diff
+        + 8 * corner_closeness_diff
+        + 2 * parity_term;
+
+    (raw / 8).clamp(-(SCORE_MAX as i32), SCORE_MAX as i32) as i16
 }
 
 fn oriented_bits(board: &Board) -> (u64, u64) {
@@ -748,90 +762,53 @@ fn oriented_bits(board: &Board) -> (u64, u64) {
     }
 }
 
-fn build_board_array(player_bits: u64, opponent_bits: u64) -> [u8; 64] {
-    let mut board_array = [2u8; 64];
-    for (square, cell) in board_array.iter_mut().enumerate() {
-        let bit = 1u64 << square;
-        *cell = if player_bits & bit != 0 {
-            0
-        } else if opponent_bits & bit != 0 {
-            1
-        } else {
-            2
-        };
+fn opponent_board(board: &Board) -> Board {
+    Board {
+        black_bits: board.black_bits,
+        white_bits: board.white_bits,
+        side_to_move: match board.side_to_move {
+            crate::engine::Color::Black => crate::engine::Color::White,
+            crate::engine::Color::White => crate::engine::Color::Black,
+        },
     }
-    board_array
 }
 
-fn pick_pattern_idx(board_array: &[u8; 64], squares: &[u8; 10], len: usize) -> usize {
-    let mut index = 0usize;
-    for &square in &squares[..len] {
-        index *= 3;
-        index += board_array[square as usize] as usize;
-    }
-    index
+fn potential_mobility(bits: u64, empty_bits: u64) -> i32 {
+    (neighbor_mask(bits) & empty_bits).count_ones() as i32
 }
 
-fn eval_tables() -> &'static EvalTables {
-    EVAL_TABLES.get_or_init(EvalTables::load)
+fn frontier_count(bits: u64, empty_bits: u64) -> i32 {
+    (bits & neighbor_mask(empty_bits)).count_ones() as i32
 }
 
-impl EvalTables {
-    fn load() -> Self {
-        let bytes = include_bytes!("../ref/Egaroucid/bin/resources/eval.egev2");
-        let compressed_count = i32::from_le_bytes(
-            bytes[0..4]
-                .try_into()
-                .expect("eval.egev2 header must contain entry count"),
-        ) as usize;
-        let compressed_bytes = &bytes[4..];
-        assert_eq!(
-            compressed_bytes.len(),
-            compressed_count * 2,
-            "eval.egev2 size does not match the compressed entry count"
-        );
-
-        let mut raw = Vec::with_capacity(expected_unzipped_len());
-        for chunk in compressed_bytes.chunks_exact(2) {
-            let value = i16::from_le_bytes([chunk[0], chunk[1]]);
-            if value >= N_ZEROS_PLUS {
-                raw.extend(std::iter::repeat_n(0i16, (value - N_ZEROS_PLUS) as usize));
-            } else {
-                raw.push(value);
-            }
-        }
-
-        assert_eq!(
-            raw.len(),
-            expected_unzipped_len(),
-            "eval.egev2 unzipped length mismatch"
-        );
-
-        let mut pattern_offsets = [0usize; 16];
-        let mut cursor = 0usize;
-        for (idx, size) in PATTERN_SIZES.iter().enumerate() {
-            pattern_offsets[idx] = cursor;
-            cursor += POW3[*size];
-        }
-
-        Self {
-            raw: raw.into_boxed_slice(),
-            pattern_offsets,
-            pattern_phase_span: cursor,
-            phase_stride: cursor + MAX_STONE_NUM,
+fn corner_closeness_penalty(player_bits: u64, opponent_bits: u64) -> i32 {
+    let corners = [
+        (0u64, (1u64 << 1) | (1u64 << 8), 1u64 << 9),
+        (1u64 << 7, (1u64 << 6) | (1u64 << 15), 1u64 << 14),
+        (1u64 << 56, (1u64 << 48) | (1u64 << 57), 1u64 << 49),
+        (1u64 << 63, (1u64 << 55) | (1u64 << 62), 1u64 << 54),
+    ];
+    let mut diff = 0i32;
+    for (corner, c_mask, x_mask) in corners {
+        if (player_bits | opponent_bits) & corner == 0 {
+            diff += (opponent_bits & c_mask).count_ones() as i32;
+            diff -= (player_bits & c_mask).count_ones() as i32;
+            diff += 2 * (opponent_bits & x_mask).count_ones() as i32;
+            diff -= 2 * (player_bits & x_mask).count_ones() as i32;
         }
     }
+    diff
+}
 
-    fn pattern_value(&self, phase_idx: usize, pattern_idx: usize, feature_value: usize) -> i16 {
-        let index =
-            phase_idx * self.phase_stride + self.pattern_offsets[pattern_idx] + feature_value;
-        self.raw[index]
-    }
-
-    fn eval_num_value(&self, phase_idx: usize, player_count: usize) -> i16 {
-        let index = phase_idx * self.phase_stride + self.pattern_phase_span + player_count;
-        self.raw[index]
-    }
+fn neighbor_mask(bits: u64) -> u64 {
+    ((bits & NOT_FILE_H) << 1)
+        | ((bits & NOT_FILE_A) >> 1)
+        | (bits << 8)
+        | (bits >> 8)
+        | ((bits & NOT_FILE_H) << 9)
+        | ((bits & NOT_FILE_H) >> 7)
+        | ((bits & NOT_FILE_A) << 7)
+        | ((bits & NOT_FILE_A) >> 9)
 }
 
 impl BoardKey {
@@ -885,11 +862,6 @@ impl SearchState {
     fn should_stop(&self) -> bool {
         self.node_limit_reached() || self.time_limit_reached()
     }
-}
-
-fn expected_unzipped_len() -> usize {
-    let pattern_phase_span: usize = PATTERN_SIZES.iter().map(|&size| POW3[size]).sum();
-    N_PHASES * (pattern_phase_span + MAX_STONE_NUM)
 }
 
 #[cfg(test)]

@@ -4,7 +4,6 @@ mod flip_tables;
 mod python;
 mod random_play;
 mod search;
-mod search_eval_data;
 mod serialize;
 mod symmetry;
 
