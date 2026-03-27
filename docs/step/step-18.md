@@ -61,13 +61,13 @@
 
 ## 受け入れ条件
 
-- [ ] `ref` の midgame 探索入口ファイルが特定されている
-- [ ] `Search` 相当の最小状態が Rust に入っている
-- [ ] `mid_evaluate_diff` を動かす最小評価導線がある
-- [ ] `nega_scout` の最小核が Rust に入っている
-- [ ] `search_best_move` の Rust API がある
-- [ ] `ref` に無い独自探索を追加していない
-- [ ] `make check` が成功する
+- [x] `ref` の midgame 探索入口ファイルが特定されている
+- [x] `Search` 相当の最小状態が Rust に入っている
+- [x] `mid_evaluate_diff` を動かす最小評価導線がある
+- [x] `nega_scout` の最小核が Rust に入っている
+- [x] `search_best_move` の Rust API がある
+- [x] `ref` に無い独自探索を追加していない
+- [x] `make check` が成功する
 
 ## 実装方針
 
@@ -107,3 +107,30 @@
 
 Step 17 で exact/endgame 側の最小核は入ったため、次は midgame 探索をつないで `ref` AI の通常推論へ進める段階にある。
 ここで `mid_evaluate_diff` と `nega_scout` の最小核を先に固めることで、その後の ordering や TT の段階的移植がやりやすくなる。
+
+## 実装結果
+
+- `src/search.rs` を復旧し、Step 17 の exact solver を維持したまま midgame 探索を追加した
+- `src/search_eval_data.rs` を追加し、`ref/Egaroucid/src/engine/evaluate_generic.hpp` の
+  `feature_to_coord` を Veloversi の square 番号へ変換した定数として保持した
+- `ref/Egaroucid/bin/resources/eval.egev2` は `include_bytes!` で埋め込み、
+  `OnceLock` で一度だけ展開して評価テーブルを初期化する構成にした
+- Rust 公開 API として次を追加した
+  - `SearchConfig`
+  - `SearchResult`
+  - `ScoreKind`
+  - `search_best_move`
+- `search_best_move` は次の最小核で構成した
+  - `exact_solver_empty_threshold` による exact solver への移行
+  - `mid_evaluate_diff`
+  - `nega_scout` の最小核
+  - root での最小 PVS
+- `time_limit_ms`、`use_transposition_table`、`multi_pv` は Step 18 ではまだ `ref` 寄せしていない
+
+## 検証結果
+
+- `cargo test`: 成功
+  - `99 passed; 0 failed; 6 ignored`
+- `make check`: 成功
+- `make coverage-check`: 成功
+  - line coverage `87.45%`

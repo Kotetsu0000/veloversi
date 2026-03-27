@@ -755,6 +755,9 @@ pub struct SearchConfig {
 
 説明:
 - 探索停止条件と補助機能の設定
+- Step 18 時点では `max_depth` と `exact_solver_empty_threshold` を優先実装対象とし、
+  `max_nodes` は簡易打ち切りに使う
+- `time_limit_ms`、`use_transposition_table`、`multi_pv` は後続 step で `ref` 実装へ寄せる
 
 ### 6.2 SearchResult
 
@@ -788,8 +791,8 @@ pub fn search_best_move(board: &Board, config: &SearchConfig) -> SearchResult
 
 公開範囲:
 - Rust 公開
-- Python 公開
-- WASM 条件付き公開
+- Python は後続 step で公開
+- WASM は後続 step で検討
 
 ### 6.4 `solve_exact`
 
@@ -837,7 +840,7 @@ pub fn solve_exact(board: &Board, config: &SolveConfig) -> Result<SolveResult, S
 
 公開範囲:
 - Rust 公開
-- Python 公開
+- Python は後続 step で公開
 - WASM 非公開
 
 ### 6.5 `can_solve_exact`
@@ -851,7 +854,7 @@ pub fn can_solve_exact(board: &Board, config: &SolveConfig) -> bool
 
 公開範囲:
 - Rust 公開
-- Python 公開
+- Python は後続 step で公開
 - WASM 非公開
 
 ## 7. Python 公開 API 仕様

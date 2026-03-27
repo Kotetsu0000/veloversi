@@ -4,6 +4,7 @@ mod flip_tables;
 mod python;
 mod random_play;
 mod search;
+mod search_eval_data;
 mod serialize;
 mod symmetry;
 
@@ -22,6 +23,9 @@ pub use random_play::{
     PositionSamplingConfig, RandomGameTrace, RandomPlayConfig, play_random_game,
     sample_reachable_positions,
 };
-pub use search::{SolveConfig, SolveError, SolveResult, can_solve_exact, solve_exact};
+pub use search::{
+    ScoreKind, SearchConfig, SearchResult, SolveConfig, SolveError, SolveResult, can_solve_exact,
+    search_best_move, solve_exact,
+};
 pub use serialize::{PackedBoard, pack_board, unpack_board};
 pub use symmetry::{Symmetry, all_symmetries, transform_board, transform_square};
