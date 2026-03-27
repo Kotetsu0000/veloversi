@@ -92,6 +92,24 @@
   - `multi_pv` を入れると返り値を増やしたくなる
   - このため Step 20 では `SearchResult` を変えず、まず best line の安定化を優先する
 
+- 打ち切り時の返り値規約
+  - 途中停止を error にするか、その時点の最良結果にするかを先に固定しないと API がぶれる
+  - このため Step 20 では error を増やさず、その時点の最良結果を返す
+  - 探索状態は `reached_depth` と `searched_nodes` で表す
+
+- exact solver と時間制限の関係
+  - exact solver に入ったあとまで時間制限を強くかけると仕様がぶれる
+  - このため Step 20 では exact solver に入った後は最後まで走らせる
+  - `time_limit_ms` は通常探索に対して効かせる
+
+- 検証観点
+  - `time_limit_ms` と `multi_pv` は結果が壊れていないことの確認が重要
+  - このため次を直接確認する
+    - `time_limit_ms=None` と短い制限ありで結果型が壊れない
+    - `searched_nodes` が減る
+    - `reached_depth` が不正にならない
+    - `multi_pv=1` と `multi_pv>1` で `best_move` / `best_score` / `pv` が壊れない
+
 ## `ref` 参照の起点
 
 - 探索入口:
