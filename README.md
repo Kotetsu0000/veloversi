@@ -142,6 +142,52 @@ uv run maturin develop
 `abi3` wheel を使っているため、配布 artifact は OS / arch 中心です。
 一方で、workflow 内では Python `3.12`, `3.13`, `3.14` の install / import smoke test を別 matrix で実行します。
 
+## Release からのインストール
+
+GitHub Release の Assets から、自分の OS / arch に合う wheel をダウンロードして `pip` でインストールします。
+
+`cp312-abi3` は「Python 3.12 以上で共通に使える abi3 wheel」を意味します。
+そのため、Python 3.13 や 3.14 でも別 wheel は不要です。
+
+### Linux x86_64
+
+```bash
+uv add "https://github.com/Kotetsu0000/veloversi/releases/download/v0.0.1/veloversi-0.0.1-cp312-abi3-manylinux_2_34_x86_64.whl"
+```
+
+### Linux aarch64
+
+```bash
+uv add "https://github.com/Kotetsu0000/veloversi/releases/download/v0.0.1/veloversi-0.0.1-cp312-abi3-manylinux_2_34_aarch64.whl"
+```
+
+### macOS Intel
+
+```bash
+uv add "https://github.com/Kotetsu0000/veloversi/releases/download/v0.0.1/veloversi-0.0.1-cp312-abi3-macosx_10_12_x86_64.whl"
+```
+
+### macOS Apple Silicon
+
+```bash
+uv add "https://github.com/Kotetsu0000/veloversi/releases/download/v0.0.1/veloversi-0.0.1-cp312-abi3-macosx_11_0_arm64.whl"
+```
+
+### Windows x86_64
+
+```powershell
+uv add "https://github.com/Kotetsu0000/veloversi/releases/download/v0.0.1/veloversi-0.0.1-cp312-abi3-win_amd64.whl"
+```
+
+### sdist からインストール
+
+wheel が合わない環境では、Release に含まれる `veloversi-0.0.1.tar.gz` からインストールできます。
+この場合は Rust toolchain が必要です。
+
+```bash
+uv add "https://github.com/Kotetsu0000/veloversi/releases/download/v0.0.1/veloversi-0.0.1.tar.gz"
+```
+
 ## 一時的な疎通確認テスト
 
 Step 01 では、検証基盤が機能することを確認するための最小テストを Rust / Python に追加しています。
