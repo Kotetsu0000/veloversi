@@ -794,7 +794,35 @@ pub fn search_best_move(board: &Board, config: &SearchConfig) -> SearchResult
 ### 6.4 `solve_exact`
 
 ```rust
-pub fn solve_exact(board: &Board, config: &SolveConfig) -> SolveResult
+pub struct SolveConfig {
+    pub exact_solver_empty_threshold: u8,
+}
+
+pub struct SolveResult {
+    pub best_move: Option<Move>,
+    pub exact_margin: i16,
+    pub pv: Vec<Move>,
+    pub searched_nodes: u64,
+}
+
+pub enum SolveError {
+    NotEligible,
+}
+```
+
+説明:
+- `exact_solver_empty_threshold` 以下の empty 数に限定して完全読みを有効化する
+- `exact_margin` は現手番視点の exact stone margin とする
+- `pv` は actual move のみを並べ、pass は明示しない
+- 対象条件を満たさない場合は `SolveError::NotEligible` を返す
+
+公開範囲:
+- Rust 公開
+- Python は後続 step で公開
+- WASM 非公開
+
+```rust
+pub fn solve_exact(board: &Board, config: &SolveConfig) -> Result<SolveResult, SolveError>
 ```
 
 説明:
