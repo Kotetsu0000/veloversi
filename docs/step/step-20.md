@@ -61,13 +61,13 @@
 
 ## 受け入れ条件
 
-- [ ] `ref` の時間管理入口ファイルが特定されている
-- [ ] `time_limit_ms` が探索停止条件として接続されている
-- [ ] root 限定の `multi_pv` 最小実装が入っている
-- [ ] `pv` が安定して返る
-- [ ] `SearchResult` の互換を壊していない
-- [ ] `ref` に無い独自探索を追加していない
-- [ ] `make check` が成功する
+- [x] `ref` の時間管理入口ファイルが特定されている
+- [x] `time_limit_ms` が探索停止条件として接続されている
+- [x] root 限定の `multi_pv` 最小実装が入っている
+- [x] `pv` が安定して返る
+- [x] `SearchResult` の互換を壊していない
+- [x] `ref` に無い独自探索を追加していない
+- [x] `make check` が成功する
 
 ## 実装方針
 
@@ -124,3 +124,25 @@
 Step 19 で `SearchConfig` の `use_transposition_table` までは実装へ接続できたため、
 次は残っている `time_limit_ms` と `multi_pv` を最小構成で埋める段階にある。
 ここを片付けることで、Rust 側の `search_best_move` は `ref` AI 公開前の土台としてかなり揃う。
+
+## 実装結果
+
+- `time_limit_ms` を通常探索の停止条件へ接続した
+  - exact solver へ入った後は打ち切らない
+  - 通常探索では root と再帰の節目で停止判定を行う
+  - 打ち切り時は error を返さず、その時点の最良結果を返す
+- root 限定の `multi_pv` を最小構成で導入した
+  - root 候補を複数保持する
+  - 外部 API の `SearchResult` は変更していない
+  - best line の安定化にだけ使う
+- `pv` と `best_move` の更新規約を整理し、途中停止時でも結果形が崩れないようにした
+
+## 検証結果
+
+- `make check`: 成功
+  - Rust: `104 passed; 0 failed; 6 ignored`
+  - Python: `28 passed`
+- `cargo test search::tests -- --nocapture`: 成功
+  - `time_limit_ms` あり/なしで結果形が壊れないことを確認
+  - exact solver 経路は `time_limit_ms` で打ち切られないことを確認
+  - `multi_pv=1` と `multi_pv>1` で best line が壊れないことを確認

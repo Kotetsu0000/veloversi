@@ -755,12 +755,16 @@ pub struct SearchConfig {
 
 説明:
 - 探索停止条件と補助機能の設定
-- Step 19 時点では次を実装対象としている
+- Step 20 時点では次を実装対象としている
   - `max_depth`
   - `max_nodes`
+  - `time_limit_ms`
   - `exact_solver_empty_threshold`
   - `use_transposition_table`
-- `time_limit_ms` と `multi_pv` は後続 step で `ref` 実装へ寄せる
+  - `multi_pv`
+- `time_limit_ms` は最小実装で、通常探索の停止条件として接続される
+- `multi_pv` は最小実装で、root の候補保持と best line 安定化にのみ使う
+- `time_limit_ms` / `multi_pv` の full 実装は後続 step で `ref` 実装へさらに寄せる
 
 ### 6.2 SearchResult
 

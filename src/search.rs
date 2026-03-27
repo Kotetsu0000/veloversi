@@ -5,6 +5,7 @@ use crate::engine::{
 use crate::search_eval_data::{FEATURE_CELL_COUNTS, FEATURE_TO_PATTERN, FEATURE_TO_SQUARES};
 use std::collections::HashMap;
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 const SCORE_MAX: i16 = 64;
 const SCORE_INF: i16 = 127;
@@ -76,6 +77,7 @@ struct SearchLine {
     best_score: i16,
     pv: Vec<Move>,
     is_exact: bool,
+    completed: bool,
 }
 
 struct SearchState {
@@ -83,6 +85,7 @@ struct SearchState {
     max_nodes: Option<u64>,
     exact_solver_empty_threshold: Option<u8>,
     transposition_table: Option<TranspositionTable>,
+    deadline: Option<Instant>,
 }
 
 struct EvalTables {
@@ -127,6 +130,11 @@ struct OrderedMove {
     is_immediate_win: bool,
 }
 
+#[derive(Clone)]
+struct RootCandidate {
+    line: SearchLine,
+}
+
 pub fn can_solve_exact(board: &Board, config: &SolveConfig) -> bool {
     disc_count(board).empty <= config.exact_solver_empty_threshold
 }
@@ -147,8 +155,6 @@ pub fn solve_exact(board: &Board, config: &SolveConfig) -> Result<SolveResult, S
 }
 
 pub fn search_best_move(board: &Board, config: &SearchConfig) -> SearchResult {
-    let _ = (config.time_limit_ms, config.multi_pv);
-
     if let Some(threshold) = config.exact_solver_empty_threshold {
         let exact_config = SolveConfig {
             exact_solver_empty_threshold: threshold,
@@ -168,7 +174,7 @@ pub fn search_best_move(board: &Board, config: &SearchConfig) -> SearchResult {
         }
     }
 
-    let requested_depth = config.max_depth.unwrap_or(1);
+    let requested_depth = config.max_depth.unwrap_or(disc_count(board).empty.max(1));
     if requested_depth == 0 {
         return SearchResult {
             best_move: None,
@@ -201,6 +207,7 @@ pub fn search_best_move(board: &Board, config: &SearchConfig) -> SearchResult {
                     transposition_table: config
                         .use_transposition_table
                         .then(TranspositionTable::default),
+                    deadline: deadline_from_config(config),
                 };
                 let passed = apply_forced_pass(board).expect("forced pass must succeed");
                 let line = nega_scout(
@@ -217,7 +224,7 @@ pub fn search_best_move(board: &Board, config: &SearchConfig) -> SearchResult {
                     score_kind: ScoreKind::MarginFromSideToMove,
                     pv: line.pv,
                     searched_nodes: state.searched_nodes,
-                    reached_depth: requested_depth,
+                    reached_depth: if line.completed { requested_depth } else { 0 },
                     is_exact: line.is_exact,
                 }
             }
@@ -232,99 +239,51 @@ pub fn search_best_move(board: &Board, config: &SearchConfig) -> SearchResult {
         transposition_table: config
             .use_transposition_table
             .then(TranspositionTable::default),
+        deadline: deadline_from_config(config),
     };
-    let mut tt_move = None;
-    if let Some(table) = state.transposition_table.as_ref() {
-        tt_move = table.best_move_for(board);
-    }
-    let moves = ordered_moves(board, legal, tt_move);
-    let mut best_move = None;
-    let mut best_score = i16::MIN;
-    let mut best_pv = Vec::new();
-    let mut alpha = -SCORE_INF;
-    let beta = SCORE_INF;
-    let mut best_exact = true;
-    let original_alpha = alpha;
+    let multi_pv = config.multi_pv.max(1);
 
-    for (idx, ordered) in moves.into_iter().enumerate() {
-        if state.node_limit_reached() && best_move.is_some() {
-            break;
-        }
-        let child = if ordered.is_immediate_win {
-            SearchLine {
-                best_move: None,
-                best_score: -SCORE_MAX,
-                pv: Vec::new(),
-                is_exact: true,
+    if config.time_limit_ms.is_some() {
+        let mut last_completed = None;
+        let mut last_partial = None;
+        for depth in 1..=requested_depth {
+            let line = search_root(board, legal, depth, multi_pv, &mut state);
+            if line.completed {
+                last_completed = Some((depth, line.clone()));
+                last_partial = Some((depth, line));
+                if state.time_limit_reached() {
+                    break;
+                }
+            } else {
+                if last_partial.is_none() {
+                    last_partial = Some((depth, line));
+                }
+                break;
             }
-        } else if idx == 0 {
-            nega_scout(
-                &ordered.next,
-                requested_depth - 1,
-                -beta,
-                -alpha,
-                false,
-                &mut state,
-            )
-        } else {
-            let mut probe = nega_scout(
-                &ordered.next,
-                requested_depth - 1,
-                -(alpha + 1),
-                -alpha,
-                false,
-                &mut state,
-            );
-            let probe_score = -probe.best_score;
-            if probe_score > alpha && probe_score < beta {
-                probe = nega_scout(
-                    &ordered.next,
-                    requested_depth - 1,
-                    -beta,
-                    -alpha,
-                    false,
-                    &mut state,
-                );
-            }
-            probe
-        };
-        let score = -child.best_score;
-        if score > best_score {
-            best_move = Some(ordered.mv);
-            best_score = score;
-            best_exact = child.is_exact;
-            best_pv.clear();
-            best_pv.push(ordered.mv);
-            best_pv.extend(child.pv);
         }
-        alpha = alpha.max(score);
-        if alpha >= beta {
-            break;
+        let (reached_depth, line) = last_completed
+            .or(last_partial)
+            .expect("root legal moves guarantee at least one result");
+        SearchResult {
+            best_move: line.best_move,
+            best_score: line.best_score,
+            score_kind: ScoreKind::MarginFromSideToMove,
+            pv: line.pv,
+            searched_nodes: state.searched_nodes,
+            reached_depth,
+            is_exact: line.is_exact,
         }
-    }
-
-    if let Some(table) = state.transposition_table.as_mut() {
-        let bound = determine_bound(best_score, original_alpha, beta);
-        table.store(
-            board,
-            TranspositionEntry {
-                depth: requested_depth,
-                bound,
-                score: best_score,
-                best_move,
-                is_exact: best_exact,
-            },
-        );
-    }
-
-    SearchResult {
-        best_move,
-        best_score,
-        score_kind: ScoreKind::MarginFromSideToMove,
-        pv: best_pv,
-        searched_nodes: state.searched_nodes,
-        reached_depth: requested_depth,
-        is_exact: best_exact,
+    } else {
+        let line = search_root(board, legal, requested_depth, multi_pv, &mut state);
+        SearchResult {
+            best_move: line.best_move,
+            best_score: line.best_score,
+            score_kind: ScoreKind::MarginFromSideToMove,
+            pv: line.pv,
+            searched_nodes: state.searched_nodes,
+            reached_depth: if line.completed { requested_depth } else { 0 },
+            is_exact: line.is_exact,
+        }
     }
 }
 
@@ -376,6 +335,126 @@ fn solve_exact_line(board: &Board, searched_nodes: &mut u64) -> ExactLine {
     }
 }
 
+fn search_root(
+    board: &Board,
+    legal: crate::engine::LegalMoves,
+    depth: u8,
+    multi_pv: u8,
+    state: &mut SearchState,
+) -> SearchLine {
+    let mut tt_move = None;
+    if let Some(table) = state.transposition_table.as_ref() {
+        tt_move = table.best_move_for(board);
+    }
+    let moves = ordered_moves(board, legal, tt_move);
+    let mut best_move = None;
+    let mut best_score = i16::MIN;
+    let mut best_pv = Vec::new();
+    let mut alpha = -SCORE_INF;
+    let beta = SCORE_INF;
+    let original_alpha = alpha;
+    let mut best_exact = true;
+    let mut completed = true;
+    let mut root_candidates = Vec::new();
+
+    for (idx, ordered) in moves.into_iter().enumerate() {
+        if state.should_stop() && best_move.is_some() {
+            completed = false;
+            break;
+        }
+        let child = if ordered.is_immediate_win {
+            SearchLine {
+                best_move: None,
+                best_score: -SCORE_MAX,
+                pv: Vec::new(),
+                is_exact: true,
+                completed: true,
+            }
+        } else {
+            let remaining_depth = depth.saturating_sub(1);
+            if idx == 0 {
+                nega_scout(&ordered.next, remaining_depth, -beta, -alpha, false, state)
+            } else {
+                let mut probe = nega_scout(
+                    &ordered.next,
+                    remaining_depth,
+                    -(alpha + 1),
+                    -alpha,
+                    false,
+                    state,
+                );
+                let probe_score = -probe.best_score;
+                if probe.completed && probe_score > alpha && probe_score < beta {
+                    probe = nega_scout(&ordered.next, remaining_depth, -beta, -alpha, false, state);
+                }
+                probe
+            }
+        };
+
+        let score = -child.best_score;
+        let mut candidate_pv = Vec::with_capacity(child.pv.len() + 1);
+        candidate_pv.push(ordered.mv);
+        candidate_pv.extend(child.pv.clone());
+        update_root_candidates(
+            &mut root_candidates,
+            RootCandidate {
+                line: SearchLine {
+                    best_move: Some(ordered.mv),
+                    best_score: score,
+                    pv: candidate_pv.clone(),
+                    is_exact: child.is_exact,
+                    completed: child.completed,
+                },
+            },
+            multi_pv,
+        );
+
+        if (child.completed || best_move.is_none()) && score > best_score {
+            best_move = Some(ordered.mv);
+            best_score = score;
+            best_exact = child.is_exact;
+            best_pv = candidate_pv;
+        }
+        completed &= child.completed;
+        alpha = alpha.max(score);
+        if alpha >= beta || state.should_stop() {
+            if state.should_stop() {
+                completed = false;
+            }
+            break;
+        }
+    }
+
+    if let Some(primary) = root_candidates.first() {
+        best_move = primary.line.best_move;
+        best_score = primary.line.best_score;
+        best_exact = primary.line.is_exact;
+        best_pv = primary.line.pv.clone();
+    }
+
+    if completed && let Some(table) = state.transposition_table.as_mut() {
+        let bound = determine_bound(best_score, original_alpha, beta);
+        table.store(
+            board,
+            TranspositionEntry {
+                depth,
+                bound,
+                score: best_score,
+                best_move,
+                is_exact: best_exact,
+            },
+        );
+    }
+
+    SearchLine {
+        best_move,
+        best_score,
+        pv: best_pv,
+        is_exact: best_exact,
+        completed,
+    }
+}
+
 fn nega_scout(
     board: &Board,
     depth: u8,
@@ -399,16 +478,18 @@ fn nega_scout(
                 best_score: exact.exact_margin,
                 pv: exact.pv,
                 is_exact: true,
+                completed: true,
             };
         }
     }
 
-    if state.node_limit_reached() {
+    if state.should_stop() {
         return SearchLine {
             best_move: None,
             best_score: leaf_score(board),
             pv: Vec::new(),
             is_exact: false,
+            completed: false,
         };
     }
 
@@ -428,6 +509,7 @@ fn nega_scout(
                     best_score: entry.score,
                     pv: entry.best_move.into_iter().collect(),
                     is_exact: entry.is_exact,
+                    completed: true,
                 };
             }
             BoundKind::Lower => alpha = alpha.max(entry.score),
@@ -439,6 +521,7 @@ fn nega_scout(
                 best_score: entry.score,
                 pv: entry.best_move.into_iter().collect(),
                 is_exact: entry.is_exact,
+                completed: true,
             };
         }
     }
@@ -451,6 +534,7 @@ fn nega_scout(
                 best_score: final_margin_from_side_to_move(board) as i16,
                 pv: Vec::new(),
                 is_exact: true,
+                completed: true,
             },
             BoardStatus::ForcedPass => {
                 if skipped {
@@ -459,6 +543,7 @@ fn nega_scout(
                         best_score: final_margin_from_side_to_move(board) as i16,
                         pv: Vec::new(),
                         is_exact: true,
+                        completed: true,
                     }
                 } else {
                     let passed = apply_forced_pass(board).expect("forced pass must succeed");
@@ -468,6 +553,7 @@ fn nega_scout(
                         best_score: -child.best_score,
                         pv: child.pv,
                         is_exact: child.is_exact,
+                        completed: child.completed,
                     }
                 }
             }
@@ -481,6 +567,7 @@ fn nega_scout(
             best_score: leaf_score(board),
             pv: Vec::new(),
             is_exact: false,
+            completed: true,
         };
     }
 
@@ -489,6 +576,7 @@ fn nega_scout(
     let mut best_score = i16::MIN;
     let mut best_pv = Vec::new();
     let mut best_exact = true;
+    let mut completed = true;
 
     for (idx, ordered) in moves.into_iter().enumerate() {
         let child = if ordered.is_immediate_win {
@@ -497,6 +585,7 @@ fn nega_scout(
                 best_score: -SCORE_MAX,
                 pv: Vec::new(),
                 is_exact: true,
+                completed: true,
             }
         } else if idx == 0 {
             nega_scout(&ordered.next, depth - 1, -beta_bound, -alpha, false, state)
@@ -518,10 +607,11 @@ fn nega_scout(
             best_pv.push(ordered.mv);
             best_pv.extend(child.pv);
         }
+        completed &= child.completed;
         if score > alpha {
             alpha = score;
         }
-        if alpha >= beta_bound {
+        if alpha >= beta_bound || !child.completed {
             break;
         }
         if state.node_limit_reached() {
@@ -534,8 +624,11 @@ fn nega_scout(
         best_score,
         pv: best_pv,
         is_exact: best_exact,
+        completed,
     };
-    if let Some(table) = state.transposition_table.as_mut() {
+    if line.completed
+        && let Some(table) = state.transposition_table.as_mut()
+    {
         table.store(
             board,
             TranspositionEntry {
@@ -559,6 +652,28 @@ fn leaf_score(board: &Board) -> i16 {
         }
         BoardStatus::Ongoing => mid_evaluate_diff(board),
     }
+}
+
+fn deadline_from_config(config: &SearchConfig) -> Option<Instant> {
+    config
+        .time_limit_ms
+        .map(|limit_ms| Instant::now() + Duration::from_millis(limit_ms))
+}
+
+fn update_root_candidates(
+    candidates: &mut Vec<RootCandidate>,
+    candidate: RootCandidate,
+    multi_pv: u8,
+) {
+    candidates.push(candidate);
+    candidates.sort_by(|left, right| {
+        right
+            .line
+            .best_score
+            .cmp(&left.line.best_score)
+            .then_with(|| left.line.pv.len().cmp(&right.line.pv.len()))
+    });
+    candidates.truncate(multi_pv as usize);
 }
 
 fn ordered_moves(
@@ -760,6 +875,15 @@ impl SearchState {
     fn node_limit_reached(&self) -> bool {
         self.max_nodes
             .is_some_and(|limit| self.searched_nodes >= limit)
+    }
+
+    fn time_limit_reached(&self) -> bool {
+        self.deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+    }
+
+    fn should_stop(&self) -> bool {
+        self.node_limit_reached() || self.time_limit_reached()
     }
 }
 
@@ -1100,6 +1224,103 @@ mod tests {
         assert_eq!(with_tt.best_score, without_tt.best_score);
         assert_eq!(with_tt.pv, without_tt.pv);
         assert_eq!(with_tt.is_exact, without_tt.is_exact);
+    }
+
+    #[test]
+    fn search_best_move_time_limit_keeps_result_shape_valid() {
+        let board = Board::new_initial();
+        let unlimited = search_best_move(
+            &board,
+            &SearchConfig {
+                max_depth: Some(5),
+                max_nodes: None,
+                time_limit_ms: None,
+                exact_solver_empty_threshold: None,
+                use_transposition_table: true,
+                multi_pv: 1,
+            },
+        );
+        let limited = search_best_move(
+            &board,
+            &SearchConfig {
+                max_depth: Some(5),
+                max_nodes: None,
+                time_limit_ms: Some(1),
+                exact_solver_empty_threshold: None,
+                use_transposition_table: true,
+                multi_pv: 1,
+            },
+        );
+
+        assert_eq!(limited.score_kind, ScoreKind::MarginFromSideToMove);
+        assert!(limited.reached_depth <= 5);
+        assert!(limited.searched_nodes <= unlimited.searched_nodes);
+        if let Some(best_move) = limited.best_move {
+            assert!(generate_legal_moves(&board).bitmask & (1u64 << best_move.square) != 0);
+        }
+    }
+
+    #[test]
+    fn search_best_move_time_limit_does_not_interrupt_exact_solver() {
+        let board = pick_multi_move_endgame_board();
+        let unlimited = search_best_move(
+            &board,
+            &SearchConfig {
+                max_depth: Some(4),
+                max_nodes: None,
+                time_limit_ms: None,
+                exact_solver_empty_threshold: Some(6),
+                use_transposition_table: true,
+                multi_pv: 1,
+            },
+        );
+        let limited = search_best_move(
+            &board,
+            &SearchConfig {
+                max_depth: Some(4),
+                max_nodes: None,
+                time_limit_ms: Some(0),
+                exact_solver_empty_threshold: Some(6),
+                use_transposition_table: true,
+                multi_pv: 1,
+            },
+        );
+
+        assert_eq!(limited.best_move, unlimited.best_move);
+        assert_eq!(limited.best_score, unlimited.best_score);
+        assert_eq!(limited.pv, unlimited.pv);
+        assert!(limited.is_exact);
+    }
+
+    #[test]
+    fn multi_pv_does_not_change_best_line() {
+        let board = Board::new_initial();
+        let single = search_best_move(
+            &board,
+            &SearchConfig {
+                max_depth: Some(4),
+                max_nodes: None,
+                time_limit_ms: None,
+                exact_solver_empty_threshold: None,
+                use_transposition_table: true,
+                multi_pv: 1,
+            },
+        );
+        let multi = search_best_move(
+            &board,
+            &SearchConfig {
+                max_depth: Some(4),
+                max_nodes: None,
+                time_limit_ms: None,
+                exact_solver_empty_threshold: None,
+                use_transposition_table: true,
+                multi_pv: 3,
+            },
+        );
+
+        assert_eq!(multi.best_move, single.best_move);
+        assert_eq!(multi.best_score, single.best_score);
+        assert_eq!(multi.pv, single.pv);
     }
 
     #[test]
