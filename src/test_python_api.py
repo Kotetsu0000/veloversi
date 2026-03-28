@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import cast
 
 import numpy as np
@@ -23,10 +24,18 @@ from veloversi import (
     initial_board,
     is_legal_move,
     legal_moves_list,
+    load_game_records,
     pack_board,
     packed_supervised_examples_from_trace,
     packed_supervised_examples_from_traces,
     play_random_game,
+    random_start_board,
+    record_move,
+    record_pass,
+    start_game_recording,
+    finish_game_recording,
+    append_game_record,
+    current_board,
     prepare_flat_learning_batch,
     prepare_planes_learning_batch,
     sample_reachable_positions,
@@ -435,6 +444,57 @@ def test_prepare_learning_batch_rejects_nonzero_history_and_invalid_examples() -
                 "perspective": "side_to_move",
             },
         )
+
+
+def test_random_start_board_is_reproducible() -> None:
+    lhs = random_start_board(5, 123)
+    rhs = random_start_board(5, 123)
+    assert lhs.to_bits() == rhs.to_bits()
+
+
+def test_start_game_recording_and_record_move_update_current_board() -> None:
+    record = start_game_recording(initial_board())
+    next_record = record_move(record, 19)
+
+    assert current_board(record).to_bits() == initial_board().to_bits()
+    assert current_board(next_record).to_bits() == apply_move(initial_board(), 19).to_bits()
+    assert next_record["moves"] == [19]
+
+
+def test_record_pass_updates_recording() -> None:
+    board = board_from_bits(0xFFFF_FFFF_FFFF_FF7E, 0x0000_0000_0000_0080, "black")
+    record = start_game_recording(board)
+    next_record = record_pass(record)
+
+    assert next_record["moves"] == [None]
+    assert current_board(next_record).to_bits() == apply_forced_pass(board).to_bits()
+
+
+def test_finish_game_recording_requires_terminal_board() -> None:
+    with pytest.raises(ValueError, match="not terminal"):
+        finish_game_recording(start_game_recording(initial_board()))
+
+
+def test_append_and_load_game_records_round_trip(tmp_path: Path) -> None:
+    path = tmp_path / "games.jsonl"
+    terminal = board_from_bits(0xFFFF_FFFF_FFFF_FFFF, 0, "black")
+    record = finish_game_recording(start_game_recording(terminal))
+
+    append_game_record(str(path), record)
+    append_game_record(str(path), record)
+    loaded = load_game_records(str(path))
+
+    assert loaded == [record, record]
+
+
+def test_append_game_record_rejects_invalid_format_file(tmp_path: Path) -> None:
+    path = tmp_path / "invalid-games.jsonl"
+    path.write_text("{bad json}\n", encoding="utf-8")
+    terminal = board_from_bits(0xFFFF_FFFF_FFFF_FFFF, 0, "black")
+    record = finish_game_recording(start_game_recording(terminal))
+
+    with pytest.raises(ValueError, match="invalid JSONL"):
+        append_game_record(str(path), record)
 
 
 def test_encode_planes_and_flat_features_return_float32_arrays() -> None:

@@ -52,3 +52,21 @@ uv run python examples/generate_training_data.py --output-dir examples/generated
 ```bash
 uv run python -m py_compile examples/pytorch_dataloader.py
 ```
+
+## `game_recording.py`
+
+任意局面から recording を開始し、終局まで手を追加して JSONL に保存する最小例です。
+
+- `random_start_board`
+- `start_game_recording`
+- `record_move`
+- `record_pass`
+- `finish_game_recording`
+- `append_game_record`
+- `load_game_records`
+
+実行:
+
+```bash
+uv run python examples/game_recording.py
+```

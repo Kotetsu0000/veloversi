@@ -75,14 +75,14 @@
 
 ## 受け入れ条件
 
-- [ ] 任意局面から recording を開始できる
-- [ ] immutable な `record_move` / `record_pass` がある
-- [ ] recording から current board を取得できる
-- [ ] recording を game record へ確定できる
-- [ ] JSONL へ保存できる
-- [ ] JSONL から複数試合を復元できる
-- [ ] Python API が追加されている
-- [ ] `make check` が成功する
+- [x] 任意局面から recording を開始できる
+- [x] immutable な `record_move` / `record_pass` がある
+- [x] recording から current board を取得できる
+- [x] recording を game record へ確定できる
+- [x] JSONL へ保存できる
+- [x] JSONL から複数試合を復元できる
+- [x] Python API が追加されている
+- [x] `make check` が成功する
 
 ## 実装方針
 
@@ -130,3 +130,22 @@
 その後の手だけを記録したい場面がある。
 そのためには保存向け supervised example とは別に、
 「試合記録そのもの」を扱う recording / game record API が必要になる。
+
+## 実装結果
+
+- Rust 側に `GameRecording` / `GameRecord` / `RecordingError` を追加した
+- `random_start_board` / `start_game_recording` / `record_move` / `record_pass` / `current_board` / `finish_game_recording` / `append_game_record` / `load_game_records` を実装した
+- JSONL は 1 行 1 試合で扱い、`append_game_record` は追記前に既存ファイル全体を検証する
+- Python 側は `dict` 公開にして、recording と game record を扱える wrapper を追加した
+- `final_result` は `black` / `white` / `draw` で固定した
+
+## 検証結果
+
+- `make check`: 成功
+- Rust: `122 passed; 0 failed; 6 ignored`
+- Python: `42 passed`
+
+## 残課題
+
+- recording に対する board 互換 API は Step 25 では最小限に留めている
+- 既存 JSONL 全件検証は正しさ優先の実装であり、大規模データ向け最適化は未着手

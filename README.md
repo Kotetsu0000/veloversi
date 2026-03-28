@@ -134,6 +134,11 @@ Step 23 では学習用 batch API を追加しています。
 返り値は `features`、`value_targets`、`policy_targets`、`legal_move_masks` を持つ `dict` です。
 shape は planes が `(B, C, 8, 8)`、flat が `(B, F)`、legal move mask が `(B, 64)` です。
 
+Step 25 では recording / game record API を追加しています。
+公開するのは `random_start_board`、`start_game_recording`、`record_move`、`record_pass`、`current_board`、`finish_game_recording`、`append_game_record`、`load_game_records` です。
+recording は immutable で、Python では `dict` として扱います。
+game record は JSONL の 1 行 1 試合で保存し、`start_board`、`moves`、`final_result`、石数、`final_margin_from_black` を含みます。
+
 配布用の `whl` でも、バイナリ全体を特定 CPU 向けに固定せず、実行時に CPU 機能を見て適切な経路を選ぶ構成にしています。
 
 現在の Perft 実装では、`ref` 配下の参考実装を参照しつつ、合法手生成と反転計算を oriented ビットボード寄りのホットパスへ寄せています。あわせて、`board_status` を経由しない Perft 専用経路、深さ 1 / 2 / 3 の末端特殊化、長時間検証時のルート手単位並列化を入れています。
@@ -154,6 +159,10 @@ uv run python examples/basic_usage.py
 
 ```bash
 uv run python examples/generate_training_data.py --output-dir examples/generated_data --num-games 2 --seed 123
+```
+
+```bash
+uv run python examples/game_recording.py
 ```
 
 ## Release artifact

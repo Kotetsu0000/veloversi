@@ -7,12 +7,19 @@ from ._core import (
     _encode_flat_features_parts,
     _encode_planes_batch_parts,
     _encode_planes_parts,
+    _append_game_record_parts,
+    _finish_game_recording_parts,
+    _load_game_records_parts,
     _packed_supervised_examples_from_trace_parts,
     _packed_supervised_examples_from_traces_parts,
     _prepare_flat_learning_batch_parts,
     _prepare_planes_learning_batch_parts,
     _play_random_game_parts,
+    _random_start_board_parts,
+    _record_move_parts,
+    _record_pass_parts,
     _sample_reachable_positions_parts,
+    _start_game_recording_parts,
     _supervised_examples_from_trace_parts,
     _supervised_examples_from_traces_parts,
     _unpack_board_parts,
@@ -56,7 +63,15 @@ __all__ = [
     "encode_flat_features_batch",
     "pack_board",
     "play_random_game",
+    "random_start_board",
     "sample_reachable_positions",
+    "start_game_recording",
+    "record_move",
+    "record_pass",
+    "current_board",
+    "finish_game_recording",
+    "append_game_record",
+    "load_game_records",
     "supervised_examples_from_trace",
     "supervised_examples_from_traces",
     "packed_supervised_examples_from_trace",
@@ -160,6 +175,10 @@ def play_random_game(seed: int, config: dict) -> dict:
     }
 
 
+def random_start_board(plies: int, seed: int) -> Board:
+    return Board(*_random_start_board_parts(seed, _validate_u16(plies, "plies")))
+
+
 def sample_reachable_positions(seed: int, config: dict) -> list[Board]:
     if type(config) is not dict:
         raise ValueError("config must be a dict")
@@ -177,10 +196,50 @@ def sample_reachable_positions(seed: int, config: dict) -> list[Board]:
     ]
 
 
+def start_game_recording(start_board: Board) -> dict[str, object]:
+    return _recording_from_parts(_start_game_recording_parts(start_board))
+
+
+def record_move(record: dict, square: int) -> dict[str, object]:
+    return _recording_from_parts(
+        _record_move_parts(*_recording_to_core_parts(record), _validate_u16(square, "square"))
+    )
+
+
+def record_pass(record: dict) -> dict[str, object]:
+    return _recording_from_parts(_record_pass_parts(*_recording_to_core_parts(record)))
+
+
+def current_board(record: dict) -> Board:
+    return cast(Board, _validate_recording(record)["current_board"])
+
+
+def finish_game_recording(record: dict) -> dict[str, object]:
+    return _game_record_from_parts(_finish_game_recording_parts(*_recording_to_core_parts(record)))
+
+
+def append_game_record(path: str, record: dict) -> None:
+    if type(path) is not str:
+        raise ValueError("path must be a str")
+    _append_game_record_parts(path, *_game_record_to_core_parts(record))
+
+
+def load_game_records(path: str) -> list[dict[str, object]]:
+    if type(path) is not str:
+        raise ValueError("path must be a str")
+    return [_game_record_from_parts(parts) for parts in _load_game_records_parts(path)]
+
+
 def _validate_random_game_trace(trace: object) -> dict[object, object]:
     if type(trace) is not dict:
         raise ValueError("trace must be a dict")
     return cast(dict[object, object], trace)
+
+
+def _validate_recording(record: object) -> dict[object, object]:
+    if type(record) is not dict:
+        raise ValueError("record must be a dict")
+    return cast(dict[object, object], record)
 
 
 def _trace_to_core_parts(
@@ -230,6 +289,119 @@ def _trace_to_core_parts(
         final_margin_from_black,
         plies_played,
         reached_terminal,
+    )
+
+
+def _recording_to_core_parts(
+    record: object,
+) -> tuple[tuple[int, int, str], tuple[int, int, str], list[int | None]]:
+    typed_record = _validate_recording(record)
+    start_board = typed_record.get("start_board")
+    current = typed_record.get("current_board")
+    moves = typed_record.get("moves")
+
+    if not isinstance(start_board, Board):
+        raise ValueError("record['start_board'] must be a Board")
+    if not isinstance(current, Board):
+        raise ValueError("record['current_board'] must be a Board")
+    if type(moves) is not list:
+        raise ValueError("record['moves'] must be a list[int | None]")
+
+    validated_moves: list[int | None] = []
+    for move in moves:
+        if move is None:
+            validated_moves.append(None)
+        elif type(move) is int and 0 <= move <= 63:
+            validated_moves.append(move)
+        else:
+            raise ValueError("record['moves'] must contain int in 0..63 or None")
+
+    return start_board.to_bits(), current.to_bits(), validated_moves
+
+
+def _recording_from_parts(
+    parts: tuple[tuple[int, int, str], tuple[int, int, str], list[int | None]],
+) -> dict[str, object]:
+    start_board_bits, current_board_bits, moves = parts
+    return {
+        "start_board": Board(*start_board_bits),
+        "current_board": Board(*current_board_bits),
+        "moves": moves,
+    }
+
+
+def _game_record_from_parts(
+    parts: tuple[tuple[int, int, str], list[int | None], str, int, int, int, int],
+) -> dict[str, object]:
+    (
+        start_board,
+        moves,
+        final_result,
+        final_black_discs,
+        final_white_discs,
+        final_empty_discs,
+        final_margin_from_black,
+    ) = parts
+    return {
+        "start_board": start_board,
+        "moves": moves,
+        "final_result": final_result,
+        "final_black_discs": final_black_discs,
+        "final_white_discs": final_white_discs,
+        "final_empty_discs": final_empty_discs,
+        "final_margin_from_black": final_margin_from_black,
+    }
+
+
+def _game_record_to_core_parts(
+    record: object,
+) -> tuple[tuple[int, int, str], list[int | None], str, int, int, int, int]:
+    if type(record) is not dict:
+        raise ValueError("record must be a dict")
+    typed_record = cast(dict[object, object], record)
+    start_board = typed_record.get("start_board")
+    moves = typed_record.get("moves")
+    final_result = typed_record.get("final_result")
+    final_black_discs = typed_record.get("final_black_discs")
+    final_white_discs = typed_record.get("final_white_discs")
+    final_empty_discs = typed_record.get("final_empty_discs")
+    final_margin_from_black = typed_record.get("final_margin_from_black")
+
+    if type(start_board) is not tuple or len(start_board) != 3:
+        raise ValueError("record['start_board'] must be tuple[int, int, str]")
+    black_bits, white_bits, side_to_move = start_board
+    if type(black_bits) is not int or type(white_bits) is not int or type(side_to_move) is not str:
+        raise ValueError("record['start_board'] must be tuple[int, int, str]")
+    if type(moves) is not list:
+        raise ValueError("record['moves'] must be a list[int | None]")
+    if type(final_result) is not str or final_result not in {"black", "white", "draw"}:
+        raise ValueError("record['final_result'] must be 'black', 'white', or 'draw'")
+    if type(final_black_discs) is not int or not (0 <= final_black_discs <= 64):
+        raise ValueError("record['final_black_discs'] must be an int in 0..64")
+    if type(final_white_discs) is not int or not (0 <= final_white_discs <= 64):
+        raise ValueError("record['final_white_discs'] must be an int in 0..64")
+    if type(final_empty_discs) is not int or not (0 <= final_empty_discs <= 64):
+        raise ValueError("record['final_empty_discs'] must be an int in 0..64")
+    if type(final_margin_from_black) is not int:
+        raise ValueError("record['final_margin_from_black'] must be an int")
+
+    validated_moves: list[int | None] = []
+    for move in moves:
+        if move is None:
+            validated_moves.append(None)
+        elif type(move) is int and 0 <= move <= 63:
+            validated_moves.append(move)
+        else:
+            raise ValueError("record['moves'] must contain int in 0..63 or None")
+
+    return (
+        (black_bits, white_bits, side_to_move),
+        validated_moves,
+        final_result,
+        final_black_discs,
+        final_white_discs,
+        final_empty_discs,
+        final_margin_from_black,
     )
 
 

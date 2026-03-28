@@ -12,10 +12,12 @@ use crate::{
 #[cfg(not(any(test, coverage)))]
 use crate::{
     FeatureConfig, FeaturePerspective, Move, PackedBoard, PackedSupervisedExample, RandomGameTrace,
-    RandomPlayConfig, SupervisedExample, encode_flat_features, encode_flat_features_batch,
-    encode_planes, encode_planes_batch, pack_board, packed_supervised_examples_from_trace,
+    RandomPlayConfig, SupervisedExample, append_game_record, encode_flat_features,
+    encode_flat_features_batch, encode_planes, encode_planes_batch, finish_game_recording,
+    load_game_records, pack_board, packed_supervised_examples_from_trace,
     packed_supervised_examples_from_traces, play_random_game, prepare_flat_learning_batch,
-    prepare_planes_learning_batch, sample_reachable_positions, supervised_examples_from_trace,
+    prepare_planes_learning_batch, random_start_board, record_move, record_pass,
+    sample_reachable_positions, start_game_recording, supervised_examples_from_trace,
     supervised_examples_from_traces, unpack_board,
 };
 
@@ -152,6 +154,12 @@ type PyRandomGameParts = (
 );
 
 #[cfg(not(any(test, coverage)))]
+type PyGameRecordingParts = (PyBoardBits, PyBoardBits, Vec<Option<u8>>);
+
+#[cfg(not(any(test, coverage)))]
+type PyGameRecordParts = (PyBoardBits, Vec<Option<u8>>, &'static str, u8, u8, u8, i8);
+
+#[cfg(not(any(test, coverage)))]
 type PySupervisedExampleParts = (PyBoardBits, u16, Vec<Option<u8>>, &'static str, i8);
 
 #[cfg(not(any(test, coverage)))]
@@ -214,6 +222,102 @@ fn packed_supervised_example_to_py_parts(
         example.final_margin_from_black,
         example.policy_target_index,
     )
+}
+
+#[cfg(not(any(test, coverage)))]
+fn game_record_to_py_parts(record: &crate::recording::GameRecord) -> PyGameRecordParts {
+    (
+        packed_board_to_py_tuple(record.start_board),
+        record.moves.clone(),
+        match record.final_result {
+            crate::GameResult::BlackWin => "black",
+            crate::GameResult::WhiteWin => "white",
+            crate::GameResult::Draw => "draw",
+        },
+        record.final_black_discs,
+        record.final_white_discs,
+        record.final_empty_discs,
+        record.final_margin_from_black,
+    )
+}
+
+#[cfg(not(any(test, coverage)))]
+fn game_recording_to_py_parts(recording: &crate::recording::GameRecording) -> PyGameRecordingParts {
+    (
+        board_to_py_tuple(&recording.start_board),
+        board_to_py_tuple(&recording.current_board),
+        recording
+            .moves
+            .iter()
+            .copied()
+            .map(move_to_py_option_square)
+            .collect(),
+    )
+}
+
+#[cfg(not(any(test, coverage)))]
+fn game_recording_from_py_parts(
+    start_board_bits: (u64, u64, String),
+    current_board_bits: (u64, u64, String),
+    moves: Vec<Option<u8>>,
+) -> PyResult<crate::recording::GameRecording> {
+    let start_board = Board::from_bits(
+        start_board_bits.0,
+        start_board_bits.1,
+        py_str_to_color(&start_board_bits.2)?,
+    )
+    .map_err(|_| pyo3::exceptions::PyValueError::new_err("invalid start board bits"))?;
+    let current_board = Board::from_bits(
+        current_board_bits.0,
+        current_board_bits.1,
+        py_str_to_color(&current_board_bits.2)?,
+    )
+    .map_err(|_| pyo3::exceptions::PyValueError::new_err("invalid current board bits"))?;
+    let moves = moves
+        .into_iter()
+        .map(|mv| mv.map(|square| Move { square }))
+        .collect();
+    Ok(crate::recording::GameRecording {
+        start_board,
+        current_board,
+        moves,
+    })
+}
+
+#[cfg(not(any(test, coverage)))]
+fn game_record_from_py_parts(
+    start_board_bits: (u64, u64, String),
+    moves: Vec<Option<u8>>,
+    final_result: &str,
+    final_black_discs: u8,
+    final_white_discs: u8,
+    final_empty_discs: u8,
+    final_margin_from_black: i8,
+) -> PyResult<crate::recording::GameRecord> {
+    let start_board = PackedBoard {
+        black_bits: start_board_bits.0,
+        white_bits: start_board_bits.1,
+        side_to_move: py_str_to_color(&start_board_bits.2)?,
+    };
+    let final_result = match final_result {
+        "black" => crate::GameResult::BlackWin,
+        "white" => crate::GameResult::WhiteWin,
+        "draw" => crate::GameResult::Draw,
+        _ => {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "final_result must be 'black', 'white', or 'draw'",
+            ));
+        }
+    };
+    Ok(crate::recording::GameRecord {
+        start_board,
+        moves,
+        final_result,
+        final_black_discs,
+        final_white_discs,
+        final_empty_discs,
+        final_margin_from_black,
+    })
 }
 
 #[cfg(not(any(test, coverage)))]
@@ -385,6 +489,94 @@ fn play_random_game_parts_py(seed: u64, max_plies: Option<u16>) -> PyRandomGameP
         trace.plies_played,
         trace.reached_terminal,
     )
+}
+
+#[pyfunction(name = "_random_start_board_parts")]
+#[cfg(not(any(test, coverage)))]
+fn random_start_board_parts_py(seed: u64, plies: u16) -> PyBoardBits {
+    board_to_py_tuple(&random_start_board(plies, seed))
+}
+
+#[pyfunction(name = "_start_game_recording_parts")]
+#[cfg(not(any(test, coverage)))]
+fn start_game_recording_parts_py(board: &PyBoard) -> PyGameRecordingParts {
+    let recording = start_game_recording(&board.inner);
+    game_recording_to_py_parts(&recording)
+}
+
+#[pyfunction(name = "_record_move_parts")]
+#[cfg(not(any(test, coverage)))]
+fn record_move_parts_py(
+    start_board_bits: (u64, u64, String),
+    current_board_bits: (u64, u64, String),
+    moves: Vec<Option<u8>>,
+    square: u8,
+) -> PyResult<PyGameRecordingParts> {
+    let recording = game_recording_from_py_parts(start_board_bits, current_board_bits, moves)?;
+    let next = record_move(&recording, Move { square })
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(format!("{err}")))?;
+    Ok(game_recording_to_py_parts(&next))
+}
+
+#[pyfunction(name = "_record_pass_parts")]
+#[cfg(not(any(test, coverage)))]
+fn record_pass_parts_py(
+    start_board_bits: (u64, u64, String),
+    current_board_bits: (u64, u64, String),
+    moves: Vec<Option<u8>>,
+) -> PyResult<PyGameRecordingParts> {
+    let recording = game_recording_from_py_parts(start_board_bits, current_board_bits, moves)?;
+    let next = record_pass(&recording)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(format!("{err}")))?;
+    Ok(game_recording_to_py_parts(&next))
+}
+
+#[pyfunction(name = "_finish_game_recording_parts")]
+#[cfg(not(any(test, coverage)))]
+fn finish_game_recording_parts_py(
+    start_board_bits: (u64, u64, String),
+    current_board_bits: (u64, u64, String),
+    moves: Vec<Option<u8>>,
+) -> PyResult<PyGameRecordParts> {
+    let recording = game_recording_from_py_parts(start_board_bits, current_board_bits, moves)?;
+    let record = finish_game_recording(&recording)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(format!("{err}")))?;
+    Ok(game_record_to_py_parts(&record))
+}
+
+#[pyfunction(name = "_append_game_record_parts")]
+#[cfg(not(any(test, coverage)))]
+#[allow(clippy::too_many_arguments)]
+fn append_game_record_parts_py(
+    path: &str,
+    start_board_bits: (u64, u64, String),
+    moves: Vec<Option<u8>>,
+    final_result: &str,
+    final_black_discs: u8,
+    final_white_discs: u8,
+    final_empty_discs: u8,
+    final_margin_from_black: i8,
+) -> PyResult<()> {
+    let record = game_record_from_py_parts(
+        start_board_bits,
+        moves,
+        final_result,
+        final_black_discs,
+        final_white_discs,
+        final_empty_discs,
+        final_margin_from_black,
+    )?;
+    append_game_record(std::path::Path::new(path), &record)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(format!("{err}")))?;
+    Ok(())
+}
+
+#[pyfunction(name = "_load_game_records_parts")]
+#[cfg(not(any(test, coverage)))]
+fn load_game_records_parts_py(path: &str) -> PyResult<Vec<PyGameRecordParts>> {
+    let records = load_game_records(std::path::Path::new(path))
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(format!("{err}")))?;
+    Ok(records.iter().map(game_record_to_py_parts).collect())
 }
 
 #[pyfunction(name = "_sample_reachable_positions_parts")]
@@ -877,6 +1069,20 @@ fn _core(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(unpack_board_parts_py, module)?)?;
     #[cfg(not(any(test, coverage)))]
     module.add_function(wrap_pyfunction!(play_random_game_parts_py, module)?)?;
+    #[cfg(not(any(test, coverage)))]
+    module.add_function(wrap_pyfunction!(random_start_board_parts_py, module)?)?;
+    #[cfg(not(any(test, coverage)))]
+    module.add_function(wrap_pyfunction!(start_game_recording_parts_py, module)?)?;
+    #[cfg(not(any(test, coverage)))]
+    module.add_function(wrap_pyfunction!(record_move_parts_py, module)?)?;
+    #[cfg(not(any(test, coverage)))]
+    module.add_function(wrap_pyfunction!(record_pass_parts_py, module)?)?;
+    #[cfg(not(any(test, coverage)))]
+    module.add_function(wrap_pyfunction!(finish_game_recording_parts_py, module)?)?;
+    #[cfg(not(any(test, coverage)))]
+    module.add_function(wrap_pyfunction!(append_game_record_parts_py, module)?)?;
+    #[cfg(not(any(test, coverage)))]
+    module.add_function(wrap_pyfunction!(load_game_records_parts_py, module)?)?;
     #[cfg(not(any(test, coverage)))]
     module.add_function(wrap_pyfunction!(
         sample_reachable_positions_parts_py,

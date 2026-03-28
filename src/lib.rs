@@ -4,6 +4,7 @@ mod flip_tables;
 mod learning;
 mod python;
 mod random_play;
+mod recording;
 mod search;
 mod serialize;
 mod symmetry;
@@ -28,6 +29,11 @@ pub use random_play::{
     SupervisedExample, packed_supervised_examples_from_trace,
     packed_supervised_examples_from_traces, play_random_game, sample_reachable_positions,
     supervised_examples_from_trace, supervised_examples_from_traces,
+};
+pub use recording::{
+    GameRecord, GameRecording, RecordingError, append_game_record, current_board,
+    finish_game_recording, load_game_records, random_start_board, record_move, record_pass,
+    start_game_recording,
 };
 pub use search::{
     ScoreKind, SearchConfig, SearchResult, SolveConfig, SolveError, SolveResult, can_solve_exact,
