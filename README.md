@@ -119,6 +119,16 @@ planes は `channels_first` で返り、shape は単一局面で `(C, 8, 8)`、b
 flat は shape が単一局面で `(F,)`、batch で `(B, F)` です。
 どちらも `numpy.ndarray` の `float32` を返し、`history` は新しい順で受け取ります。
 
+Step 21 では supervised example API を追加しています。
+公開するのは `supervised_examples_from_trace`、`supervised_examples_from_traces` です。
+各 example は `board`、`ply`、`moves_until_here`、`final_result`、`final_margin_from_black` を持ちます。
+
+Step 22 では保存向けの supervised example API を追加しています。
+公開するのは `packed_supervised_examples_from_trace`、`packed_supervised_examples_from_traces` です。
+各 example は `PackedBoard` 相当の board と、value ラベル (`final_result`, `final_margin_from_black`) に加えて、
+policy ラベルとして `policy_target_index` を持ちます。
+`policy_target_index` は `-1` が target なし、`0..63` が次手のマス、`64` が pass です。
+
 配布用の `whl` でも、バイナリ全体を特定 CPU 向けに固定せず、実行時に CPU 機能を見て適切な経路を選ぶ構成にしています。
 
 現在の Perft 実装では、`ref` 配下の参考実装を参照しつつ、合法手生成と反転計算を oriented ビットボード寄りのホットパスへ寄せています。あわせて、`board_status` を経由しない Perft 専用経路、深さ 1 / 2 / 3 の末端特殊化、長時間検証時のルート手単位並列化を入れています。
@@ -135,6 +145,10 @@ uv run maturin develop
 
 ```bash
 uv run python examples/basic_usage.py
+```
+
+```bash
+uv run python examples/generate_training_data.py --output-dir examples/generated_data --num-games 2 --seed 123
 ```
 
 ## Release artifact

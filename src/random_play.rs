@@ -2,6 +2,7 @@ use crate::engine::{
     Board, BoardStatus, GameResult, Move, apply_forced_pass, apply_move, board_status,
     final_margin_from_black, game_result, generate_legal_moves, legal_moves_to_vec,
 };
+use crate::serialize::{PackedBoard, pack_board};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RandomPlayConfig {
@@ -25,6 +26,16 @@ pub struct SupervisedExample {
     pub moves_until_here: Vec<Option<Move>>,
     pub final_result: GameResult,
     pub final_margin_from_black: i8,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackedSupervisedExample {
+    pub board: PackedBoard,
+    pub ply: u16,
+    pub moves_until_here: Vec<Option<u8>>,
+    pub final_result: GameResult,
+    pub final_margin_from_black: i8,
+    pub policy_target_index: i8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -183,16 +194,57 @@ pub fn supervised_examples_from_traces(traces: &[RandomGameTrace]) -> Vec<Superv
     examples
 }
 
+fn policy_target_index(next_move: Option<Option<Move>>) -> i8 {
+    match next_move {
+        Some(Some(mv)) => mv.square as i8,
+        Some(None) => 64,
+        None => -1,
+    }
+}
+
+pub fn packed_supervised_examples_from_trace(
+    trace: &RandomGameTrace,
+) -> Vec<PackedSupervisedExample> {
+    trace
+        .boards
+        .iter()
+        .enumerate()
+        .map(|(ply, board)| PackedSupervisedExample {
+            board: pack_board(board),
+            ply: ply as u16,
+            moves_until_here: trace.moves[..ply]
+                .iter()
+                .map(|mv| mv.map(|mv| mv.square))
+                .collect(),
+            final_result: trace.final_result,
+            final_margin_from_black: trace.final_margin_from_black,
+            policy_target_index: policy_target_index(trace.moves.get(ply).copied()),
+        })
+        .collect()
+}
+
+pub fn packed_supervised_examples_from_traces(
+    traces: &[RandomGameTrace],
+) -> Vec<PackedSupervisedExample> {
+    let mut examples = Vec::new();
+    for trace in traces {
+        examples.extend(packed_supervised_examples_from_trace(trace));
+    }
+    examples
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        PositionSamplingConfig, RandomPlayConfig, SupervisedExample, XorShift64Star,
-        play_random_game, play_random_game_from_board_with_rng, sample_reachable_positions,
+        PackedSupervisedExample, PositionSamplingConfig, RandomPlayConfig, SupervisedExample,
+        XorShift64Star, packed_supervised_examples_from_trace,
+        packed_supervised_examples_from_traces, play_random_game,
+        play_random_game_from_board_with_rng, sample_reachable_positions,
         supervised_examples_from_trace, supervised_examples_from_traces,
     };
     use crate::{
-        Board, BoardStatus, Color, apply_forced_pass, apply_move, board_status, disc_count,
-        is_legal_move,
+        Board, BoardStatus, Color, PackedBoard, apply_forced_pass, apply_move, board_status,
+        disc_count, is_legal_move,
     };
 
     #[test]
@@ -324,6 +376,55 @@ mod tests {
             [
                 supervised_examples_from_trace(&first),
                 supervised_examples_from_trace(&second),
+            ]
+            .concat()
+        );
+    }
+
+    #[test]
+    fn packed_supervised_examples_from_trace_contains_policy_and_value_labels() {
+        let trace = play_random_game(17, &RandomPlayConfig { max_plies: Some(6) });
+        let packed = packed_supervised_examples_from_trace(&trace);
+
+        assert_eq!(packed.len(), trace.boards.len());
+        for (ply, example) in packed.iter().enumerate() {
+            let expected_policy_target_index = match trace.moves.get(ply).copied() {
+                Some(Some(mv)) => mv.square as i8,
+                Some(None) => 64,
+                None => -1,
+            };
+            assert_eq!(
+                example,
+                &PackedSupervisedExample {
+                    board: PackedBoard {
+                        black_bits: trace.boards[ply].black_bits,
+                        white_bits: trace.boards[ply].white_bits,
+                        side_to_move: trace.boards[ply].side_to_move,
+                    },
+                    ply: ply as u16,
+                    moves_until_here: trace.moves[..ply]
+                        .iter()
+                        .map(|mv| mv.map(|mv| mv.square))
+                        .collect(),
+                    final_result: trace.final_result,
+                    final_margin_from_black: trace.final_margin_from_black,
+                    policy_target_index: expected_policy_target_index,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn packed_supervised_examples_from_traces_concatenates_trace_examples() {
+        let first = play_random_game(1, &RandomPlayConfig { max_plies: Some(3) });
+        let second = play_random_game(2, &RandomPlayConfig { max_plies: Some(2) });
+        let packed = packed_supervised_examples_from_traces(&[first.clone(), second.clone()]);
+
+        assert_eq!(
+            packed,
+            [
+                packed_supervised_examples_from_trace(&first),
+                packed_supervised_examples_from_trace(&second),
             ]
             .concat()
         );

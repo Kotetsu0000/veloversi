@@ -11,9 +11,10 @@ use crate::{
 };
 #[cfg(not(any(test, coverage)))]
 use crate::{
-    FeatureConfig, FeaturePerspective, Move, PackedBoard, RandomGameTrace, RandomPlayConfig,
-    SupervisedExample, encode_flat_features, encode_flat_features_batch, encode_planes,
-    encode_planes_batch, pack_board, play_random_game, sample_reachable_positions,
+    FeatureConfig, FeaturePerspective, Move, PackedBoard, PackedSupervisedExample, RandomGameTrace,
+    RandomPlayConfig, SupervisedExample, encode_flat_features, encode_flat_features_batch,
+    encode_planes, encode_planes_batch, pack_board, packed_supervised_examples_from_trace,
+    packed_supervised_examples_from_traces, play_random_game, sample_reachable_positions,
     supervised_examples_from_trace, supervised_examples_from_traces, unpack_board,
 };
 
@@ -163,6 +164,9 @@ type PyRandomGameTraceParts = (
 );
 
 #[cfg(not(any(test, coverage)))]
+type PyPackedSupervisedExampleParts = (PyBoardBits, u16, Vec<Option<u8>>, &'static str, i8, i8);
+
+#[cfg(not(any(test, coverage)))]
 fn supervised_example_to_py_parts(example: &SupervisedExample) -> PySupervisedExampleParts {
     (
         board_to_py_tuple(&example.board),
@@ -175,6 +179,20 @@ fn supervised_example_to_py_parts(example: &SupervisedExample) -> PySupervisedEx
             .collect(),
         game_result_to_py_str(example.final_result),
         example.final_margin_from_black,
+    )
+}
+
+#[cfg(not(any(test, coverage)))]
+fn packed_supervised_example_to_py_parts(
+    example: &PackedSupervisedExample,
+) -> PyPackedSupervisedExampleParts {
+    (
+        packed_board_to_py_tuple(example.board),
+        example.ply,
+        example.moves_until_here.clone(),
+        game_result_to_py_str(example.final_result),
+        example.final_margin_from_black,
+        example.policy_target_index,
     )
 }
 
@@ -390,6 +408,63 @@ fn supervised_examples_from_traces_parts_py(
     Ok(supervised_examples_from_traces(&rust_traces)
         .iter()
         .map(supervised_example_to_py_parts)
+        .collect())
+}
+
+#[pyfunction(name = "_packed_supervised_examples_from_trace_parts")]
+#[cfg(not(any(test, coverage)))]
+fn packed_supervised_examples_from_trace_parts_py(
+    boards_bits: Vec<(u64, u64, String)>,
+    moves: Vec<Option<u8>>,
+    final_result: &str,
+    final_margin_from_black: i8,
+    plies_played: u16,
+    reached_terminal: bool,
+) -> PyResult<Vec<PyPackedSupervisedExampleParts>> {
+    let trace = random_game_trace_from_py_parts(
+        boards_bits,
+        moves,
+        final_result,
+        final_margin_from_black,
+        plies_played,
+        reached_terminal,
+    )?;
+    Ok(packed_supervised_examples_from_trace(&trace)
+        .iter()
+        .map(packed_supervised_example_to_py_parts)
+        .collect())
+}
+
+#[pyfunction(name = "_packed_supervised_examples_from_traces_parts")]
+#[cfg(not(any(test, coverage)))]
+fn packed_supervised_examples_from_traces_parts_py(
+    traces: Vec<PyRandomGameTraceParts>,
+) -> PyResult<Vec<PyPackedSupervisedExampleParts>> {
+    let rust_traces = traces
+        .into_iter()
+        .map(
+            |(
+                boards_bits,
+                moves,
+                final_result,
+                final_margin_from_black,
+                plies_played,
+                reached_terminal,
+            )| {
+                random_game_trace_from_py_parts(
+                    boards_bits,
+                    moves,
+                    &final_result,
+                    final_margin_from_black,
+                    plies_played,
+                    reached_terminal,
+                )
+            },
+        )
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok(packed_supervised_examples_from_traces(&rust_traces)
+        .iter()
+        .map(packed_supervised_example_to_py_parts)
         .collect())
 }
 
@@ -630,6 +705,16 @@ fn _core(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(not(any(test, coverage)))]
     module.add_function(wrap_pyfunction!(
         supervised_examples_from_traces_parts_py,
+        module
+    )?)?;
+    #[cfg(not(any(test, coverage)))]
+    module.add_function(wrap_pyfunction!(
+        packed_supervised_examples_from_trace_parts_py,
+        module
+    )?)?;
+    #[cfg(not(any(test, coverage)))]
+    module.add_function(wrap_pyfunction!(
+        packed_supervised_examples_from_traces_parts_py,
         module
     )?)?;
     #[cfg(not(any(test, coverage)))]

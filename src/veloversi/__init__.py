@@ -7,6 +7,8 @@ from ._core import (
     _encode_flat_features_parts,
     _encode_planes_batch_parts,
     _encode_planes_parts,
+    _packed_supervised_examples_from_trace_parts,
+    _packed_supervised_examples_from_traces_parts,
     _play_random_game_parts,
     _sample_reachable_positions_parts,
     _supervised_examples_from_trace_parts,
@@ -55,6 +57,8 @@ __all__ = [
     "sample_reachable_positions",
     "supervised_examples_from_trace",
     "supervised_examples_from_traces",
+    "packed_supervised_examples_from_trace",
+    "packed_supervised_examples_from_traces",
     "unpack_board",
     "transform_board",
     "transform_square",
@@ -238,6 +242,42 @@ def _example_from_parts(
     }
 
 
+def _packed_example_from_parts(
+    parts: tuple[tuple[int, int, str], int, list[int | None], str, int, int],
+) -> dict[str, object]:
+    (
+        board_bits,
+        ply,
+        moves_until_here,
+        final_result,
+        final_margin_from_black,
+        policy_target_index,
+    ) = parts
+    if policy_target_index == -1:
+        policy_target_square: int | None = None
+        policy_target_is_pass = False
+        has_policy_target = False
+    elif policy_target_index == 64:
+        policy_target_square = None
+        policy_target_is_pass = True
+        has_policy_target = True
+    else:
+        policy_target_square = policy_target_index
+        policy_target_is_pass = False
+        has_policy_target = True
+    return {
+        "board": board_bits,
+        "ply": ply,
+        "moves_until_here": moves_until_here,
+        "final_result": final_result,
+        "final_margin_from_black": final_margin_from_black,
+        "policy_target_index": policy_target_index,
+        "policy_target_square": policy_target_square,
+        "policy_target_is_pass": policy_target_is_pass,
+        "has_policy_target": has_policy_target,
+    }
+
+
 def supervised_examples_from_trace(trace: dict) -> list[dict[str, object]]:
     return [
         _example_from_parts(parts)
@@ -251,6 +291,24 @@ def supervised_examples_from_traces(traces: list[dict]) -> list[dict[str, object
     return [
         _example_from_parts(parts)
         for parts in _supervised_examples_from_traces_parts(
+            [_trace_to_core_parts(trace) for trace in traces]
+        )
+    ]
+
+
+def packed_supervised_examples_from_trace(trace: dict) -> list[dict[str, object]]:
+    return [
+        _packed_example_from_parts(parts)
+        for parts in _packed_supervised_examples_from_trace_parts(*_trace_to_core_parts(trace))
+    ]
+
+
+def packed_supervised_examples_from_traces(traces: list[dict]) -> list[dict[str, object]]:
+    if type(traces) is not list:
+        raise ValueError("traces must be a list[dict]")
+    return [
+        _packed_example_from_parts(parts)
+        for parts in _packed_supervised_examples_from_traces_parts(
             [_trace_to_core_parts(trace) for trace in traces]
         )
     ]

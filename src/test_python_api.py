@@ -24,6 +24,8 @@ from veloversi import (
     is_legal_move,
     legal_moves_list,
     pack_board,
+    packed_supervised_examples_from_trace,
+    packed_supervised_examples_from_traces,
     play_random_game,
     sample_reachable_positions,
     supervised_examples_from_trace,
@@ -315,6 +317,47 @@ def test_supervised_examples_public_api_rejects_invalid_trace() -> None:
 
     with pytest.raises(ValueError, match="traces"):
         supervised_examples_from_traces({})  # type: ignore[arg-type]
+
+
+def test_packed_supervised_examples_from_trace_returns_policy_and_value_labels() -> None:
+    trace = play_random_game(11, {"max_plies": 6})
+    packed_examples = packed_supervised_examples_from_trace(trace)
+
+    assert len(packed_examples) == len(trace["boards"])
+    for ply, example in enumerate(packed_examples):
+        assert example["board"] == pack_board(trace["boards"][ply])
+        assert example["ply"] == ply
+        assert example["moves_until_here"] == trace["moves"][:ply]
+        assert example["final_result"] == trace["final_result"]
+        assert example["final_margin_from_black"] == trace["final_margin_from_black"]
+
+        if ply == len(trace["moves"]):
+            assert example["policy_target_index"] == -1
+            assert example["policy_target_square"] is None
+            assert example["policy_target_is_pass"] is False
+            assert example["has_policy_target"] is False
+        elif trace["moves"][ply] is None:
+            assert example["policy_target_index"] == 64
+            assert example["policy_target_square"] is None
+            assert example["policy_target_is_pass"] is True
+            assert example["has_policy_target"] is True
+        else:
+            assert example["policy_target_index"] == trace["moves"][ply]
+            assert example["policy_target_square"] == trace["moves"][ply]
+            assert example["policy_target_is_pass"] is False
+            assert example["has_policy_target"] is True
+
+
+def test_packed_supervised_examples_from_traces_concatenates_examples() -> None:
+    first = play_random_game(1, {"max_plies": 3})
+    second = play_random_game(2, {"max_plies": 2})
+
+    merged = packed_supervised_examples_from_traces([first, second])
+    separate = packed_supervised_examples_from_trace(first) + packed_supervised_examples_from_trace(
+        second
+    )
+
+    assert merged == separate
 
 
 def test_encode_planes_and_flat_features_return_float32_arrays() -> None:
