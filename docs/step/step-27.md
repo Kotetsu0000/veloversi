@@ -71,7 +71,7 @@
 - [x] `make check` が成功する
 - [x] `make coverage-check` が成功する
 - [x] `make mutants` を実行済みである
-- [x] `make mutants` の残件が equivalent / timeout / 現実的に除去困難なものだけである
+- [ ] `make mutants` の残件が equivalent / timeout / 現実的に除去困難なものだけである
 
 ## 実装方針
 
@@ -129,10 +129,11 @@
   - `learning.rs`: `99.57%`
 - `make mutants`
   - `1676 mutants tested in 20m: 405 missed, 636 caught, 594 unviable, 41 timeouts`
+  - 残件の全件仕分けと追加テストは未完
 
 ## mutation 残件の整理
 
-残件は次の 3 分類に整理した。
+残件は次の 3 分類で整理を進める。全件の仕分け完了はまだ。
 
 - equivalent
   - `engine.rs` の bit 演算の一部
