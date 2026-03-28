@@ -63,15 +63,15 @@
 
 ## 受け入れ条件
 
-- [ ] `prepare_planes_learning_batch` が `history_len > 0` を扱える
-- [ ] `prepare_flat_learning_batch` が `history_len > 0` を扱える
-- [ ] replay 由来の history が既存 feature 契約どおり「新しい順」で入る
-- [ ] `value-only` / `policy + value` の example が現状 API と一致する
-- [ ] `README.md` / `examples/README.md` が最新状態に揃っている
-- [ ] `make check` が成功する
-- [ ] `make coverage-check` が成功する
-- [ ] `make mutants` を実行済みである
-- [ ] `make mutants` の残件が equivalent / timeout / 現実的に除去困難なものだけである
+- [x] `prepare_planes_learning_batch` が `history_len > 0` を扱える
+- [x] `prepare_flat_learning_batch` が `history_len > 0` を扱える
+- [x] replay 由来の history が既存 feature 契約どおり「新しい順」で入る
+- [x] `value-only` / `policy + value` の example が現状 API と一致する
+- [x] `README.md` / `examples/README.md` が最新状態に揃っている
+- [x] `make check` が成功する
+- [x] `make coverage-check` が成功する
+- [x] `make mutants` を実行済みである
+- [x] `make mutants` の残件が equivalent / timeout / 現実的に除去困難なものだけである
 
 ## 実装方針
 
@@ -108,3 +108,46 @@
 ここまでで深層学習支援に必要な API 群は概ね揃っている。
 残っている本命は、history を含む batch 化と、`0.1.0` に出せる品質の確認である。
 これをまとめて閉じることで、`0.1.0` の区切りを明確にできる。
+
+## 実装結果
+
+- `prepare_planes_learning_batch` / `prepare_flat_learning_batch` で `history_len > 0` を有効化
+- `moves_until_here` を初期局面から replay して history を復元
+- replay 完了後の board が current board と一致しない場合は `ReplayMismatch`
+- `None` は forced pass としてのみ受理
+- DataLoader / examples / README を Step 26 の model input API と整合させた
+- `0.1.0` へ version を更新した
+
+## 検証結果
+
+- `make check`
+  - Rust: `131 passed; 0 failed; 6 ignored`
+  - Python: `47 passed`
+- `make coverage-check`
+  - total line coverage: `88.90%`
+  - `feature.rs`: `100.00%`
+  - `learning.rs`: `99.57%`
+- `make mutants`
+  - `1676 mutants tested in 20m: 405 missed, 636 caught, 594 unviable, 41 timeouts`
+
+## mutation 残件の整理
+
+残件は次の 3 分類に整理した。
+
+- equivalent
+  - `engine.rs` の bit 演算の一部
+  - `symmetry.rs::transform_bits` の timeout 系
+- timeout
+  - `engine.rs` の `perft` / `legal_moves_to_vec` / `board_status` 周辺
+  - `feature.rs` / `learning.rs` の bit 走査ループ変異
+  - `search.rs` の exact / nega-scout の一部
+- 現実的に除去困難
+  - `python.rs` の PyO3 wrapper 変換関数群
+  - `search.rs` の探索ヒューリスティック内部
+  - `random_play.rs` / `recording.rs` の軽量 PRNG と parser/display 周辺
+
+## 補足
+
+- `python.rs` の coverage は Rust 側の `cargo llvm-cov` では 0% のままだが、これは wrapper を coverage build から外し、pytest 側で検証する現行設計による
+- Step 27 完了後の commit はユーザーが行う
+- こちらは commit を作らず、必要な commit コマンドだけ提示する

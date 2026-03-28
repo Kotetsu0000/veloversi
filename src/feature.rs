@@ -449,4 +449,48 @@ mod tests {
         assert_eq!(relative.data_f32[1], 1.0);
         assert_eq!(relative.data_f32[64], 1.0);
     }
+
+    #[test]
+    fn encode_planes_writes_phase_and_turn_planes_with_expected_values() {
+        let current = apply_move(&Board::new_initial(), crate::Move { square: 19 })
+            .expect("move must succeed");
+        let config = FeatureConfig {
+            history_len: 0,
+            include_legal_mask: false,
+            include_phase_plane: true,
+            include_turn_plane: true,
+            perspective: FeaturePerspective::AbsoluteColor,
+        };
+
+        let encoded = encode_planes(&current, &[], &config);
+        let phase_plane = &encoded.data_f32[128..192];
+        let turn_plane = &encoded.data_f32[192..256];
+
+        assert!(phase_plane.iter().all(|&value| value == 1.0 / 60.0));
+        assert!(turn_plane.iter().all(|&value| value == 0.0));
+    }
+
+    #[test]
+    fn encode_flat_features_writes_phase_turn_and_legal_segments() {
+        let current = Board::new_initial();
+        let config = FeatureConfig {
+            history_len: 0,
+            include_legal_mask: true,
+            include_phase_plane: true,
+            include_turn_plane: true,
+            perspective: FeaturePerspective::SideToMove,
+        };
+
+        let encoded = encode_flat_features(&current, &[], &config);
+        let legal = &encoded.data_f32[128..192];
+        let legal_squares: Vec<usize> = legal
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, &value)| if value == 1.0 { Some(idx) } else { None })
+            .collect();
+
+        assert_eq!(legal_squares, vec![19, 26, 37, 44]);
+        assert_eq!(encoded.data_f32[192], 0.0);
+        assert_eq!(encoded.data_f32[193], 1.0);
+    }
 }

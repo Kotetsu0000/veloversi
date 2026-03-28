@@ -867,14 +867,16 @@ impl SearchState {
 #[cfg(test)]
 mod tests {
     use super::{
-        ScoreKind, SearchConfig, SearchResult, SolveConfig, SolveError, can_solve_exact,
-        mid_evaluate_diff, search_best_move, solve_exact,
+        BoardKey, BoundKind, SCORE_INF, ScoreKind, SearchConfig, SearchResult, SearchState,
+        SolveConfig, SolveError, TranspositionEntry, TranspositionTable, can_solve_exact,
+        deadline_from_config, determine_bound, mid_evaluate_diff, search_best_move, solve_exact,
     };
     use crate::engine::{
         Board, BoardStatus, Color, Move, apply_forced_pass, apply_move_unchecked, board_status,
         final_margin_from_side_to_move, generate_legal_moves, legal_moves_to_vec,
     };
     use crate::random_play::{RandomPlayConfig, play_random_game};
+    use std::time::{Duration, Instant};
 
     fn brute_force_exact(board: &Board) -> (Option<Move>, i16) {
         let legal = generate_legal_moves(board);
@@ -1321,6 +1323,123 @@ mod tests {
                 reached_depth: 0,
                 is_exact: true,
             }
+        );
+    }
+
+    #[test]
+    fn transposition_table_prefers_deeper_or_exact_entries() {
+        let board = Board::new_initial();
+        let mut table = TranspositionTable::default();
+        let key = BoardKey::new(&board);
+
+        table.store(
+            &board,
+            TranspositionEntry {
+                depth: 4,
+                bound: BoundKind::Upper,
+                score: 3,
+                best_move: Some(Move { square: 19 }),
+                is_exact: false,
+            },
+        );
+        table.store(
+            &board,
+            TranspositionEntry {
+                depth: 3,
+                bound: BoundKind::Exact,
+                score: 5,
+                best_move: Some(Move { square: 26 }),
+                is_exact: true,
+            },
+        );
+        assert_eq!(
+            table.lookup(key, 1).expect("entry must exist").best_move,
+            Some(Move { square: 19 })
+        );
+
+        table.store(
+            &board,
+            TranspositionEntry {
+                depth: 4,
+                bound: BoundKind::Exact,
+                score: 7,
+                best_move: Some(Move { square: 26 }),
+                is_exact: true,
+            },
+        );
+        assert_eq!(
+            table.lookup(key, 1).expect("entry must exist").best_move,
+            Some(Move { square: 26 })
+        );
+
+        table.store(
+            &board,
+            TranspositionEntry {
+                depth: 5,
+                bound: BoundKind::Lower,
+                score: 9,
+                best_move: Some(Move { square: 37 }),
+                is_exact: false,
+            },
+        );
+        assert_eq!(
+            table.lookup(key, 1).expect("entry must exist").best_move,
+            Some(Move { square: 37 })
+        );
+    }
+
+    #[test]
+    fn search_state_limit_helpers_reflect_configuration() {
+        let mut state = SearchState {
+            searched_nodes: 5,
+            max_nodes: Some(5),
+            exact_solver_empty_threshold: None,
+            transposition_table: None,
+            deadline: Some(Instant::now() - Duration::from_millis(1)),
+        };
+
+        assert!(state.node_limit_reached());
+        assert!(state.time_limit_reached());
+        assert!(state.should_stop());
+
+        state.max_nodes = Some(6);
+        state.deadline = Some(Instant::now() + Duration::from_secs(60));
+        assert!(!state.node_limit_reached());
+        assert!(!state.time_limit_reached());
+        assert!(!state.should_stop());
+    }
+
+    #[test]
+    fn determine_bound_classifies_upper_exact_and_lower() {
+        assert_eq!(determine_bound(-4, -4, SCORE_INF), BoundKind::Upper);
+        assert_eq!(determine_bound(3, -4, 5), BoundKind::Exact);
+        assert_eq!(determine_bound(5, -4, 5), BoundKind::Lower);
+    }
+
+    #[test]
+    fn deadline_from_config_reflects_time_limit_presence() {
+        assert!(
+            deadline_from_config(&SearchConfig {
+                max_depth: Some(1),
+                max_nodes: None,
+                time_limit_ms: None,
+                exact_solver_empty_threshold: None,
+                use_transposition_table: false,
+                multi_pv: 1,
+            })
+            .is_none()
+        );
+
+        assert!(
+            deadline_from_config(&SearchConfig {
+                max_depth: Some(1),
+                max_nodes: None,
+                time_limit_ms: Some(10),
+                exact_solver_empty_threshold: None,
+                use_transposition_table: false,
+                multi_pv: 1,
+            })
+            .is_some()
         );
     }
 }

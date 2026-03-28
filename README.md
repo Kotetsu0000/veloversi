@@ -49,7 +49,7 @@ uv run ruff format --check .
 uv run basedpyright
 cargo mutants --file 'src/*.rs' --exclude src/flip_tables.rs -j 8
 cargo llvm-cov --html
-cargo llvm-cov --fail-under-lines 80
+cargo llvm-cov --fail-under-lines 85
 cargo test --release perft_long_initial_position_mode_one_to_depth_fifteen -- --ignored --nocapture
 cargo test --release perft_long_initial_position_mode_two_to_depth_fifteen -- --ignored --nocapture
 ```
@@ -198,40 +198,40 @@ GitHub Release の Assets から、自分の OS / arch に合う wheel をダウ
 ### Linux x86_64
 
 ```bash
-uv add "https://github.com/Kotetsu0000/veloversi/releases/download/v0.0.1/veloversi-0.0.1-cp312-abi3-manylinux_2_34_x86_64.whl"
+uv add "https://github.com/Kotetsu0000/veloversi/releases/download/v0.1.0/veloversi-0.1.0-cp312-abi3-manylinux_2_34_x86_64.whl"
 ```
 
 ### Linux aarch64
 
 ```bash
-uv add "https://github.com/Kotetsu0000/veloversi/releases/download/v0.0.1/veloversi-0.0.1-cp312-abi3-manylinux_2_34_aarch64.whl"
+uv add "https://github.com/Kotetsu0000/veloversi/releases/download/v0.1.0/veloversi-0.1.0-cp312-abi3-manylinux_2_34_aarch64.whl"
 ```
 
 ### macOS Intel
 
 ```bash
-uv add "https://github.com/Kotetsu0000/veloversi/releases/download/v0.0.1/veloversi-0.0.1-cp312-abi3-macosx_10_12_x86_64.whl"
+uv add "https://github.com/Kotetsu0000/veloversi/releases/download/v0.1.0/veloversi-0.1.0-cp312-abi3-macosx_10_12_x86_64.whl"
 ```
 
 ### macOS Apple Silicon
 
 ```bash
-uv add "https://github.com/Kotetsu0000/veloversi/releases/download/v0.0.1/veloversi-0.0.1-cp312-abi3-macosx_11_0_arm64.whl"
+uv add "https://github.com/Kotetsu0000/veloversi/releases/download/v0.1.0/veloversi-0.1.0-cp312-abi3-macosx_11_0_arm64.whl"
 ```
 
 ### Windows x86_64
 
 ```powershell
-uv add "https://github.com/Kotetsu0000/veloversi/releases/download/v0.0.1/veloversi-0.0.1-cp312-abi3-win_amd64.whl"
+uv add "https://github.com/Kotetsu0000/veloversi/releases/download/v0.1.0/veloversi-0.1.0-cp312-abi3-win_amd64.whl"
 ```
 
 ### sdist からインストール
 
-wheel が合わない環境では、Release に含まれる `veloversi-0.0.1.tar.gz` からインストールできます。
+wheel が合わない環境では、Release に含まれる `veloversi-0.1.0.tar.gz` からインストールできます。
 この場合は Rust toolchain が必要です。
 
 ```bash
-uv add "https://github.com/Kotetsu0000/veloversi/releases/download/v0.0.1/veloversi-0.0.1.tar.gz"
+uv add "https://github.com/Kotetsu0000/veloversi/releases/download/v0.1.0/veloversi-0.1.0.tar.gz"
 ```
 
 ## 一時的な疎通確認テスト

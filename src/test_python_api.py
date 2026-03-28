@@ -420,21 +420,21 @@ def test_prepare_flat_learning_batch_returns_expected_shapes_and_b_equals_one() 
     assert batch["legal_move_masks"].shape == (1, 64)
 
 
-def test_prepare_learning_batch_rejects_nonzero_history_and_invalid_examples() -> None:
+def test_prepare_learning_batch_supports_nonzero_history_and_rejects_invalid_examples() -> None:
     trace = play_random_game(5, {"max_plies": 2})
     examples = packed_supervised_examples_from_trace(trace)
 
-    with pytest.raises(ValueError, match="HistoryNotSupported"):
-        prepare_planes_learning_batch(
-            examples,
-            {
-                "history_len": 1,
-                "include_legal_mask": False,
-                "include_phase_plane": True,
-                "include_turn_plane": True,
-                "perspective": "side_to_move",
-            },
-        )
+    batch = prepare_planes_learning_batch(
+        examples,
+        {
+            "history_len": 1,
+            "include_legal_mask": False,
+            "include_phase_plane": True,
+            "include_turn_plane": True,
+            "perspective": "side_to_move",
+        },
+    )
+    assert batch["features"].shape[0] == len(examples)
 
     bad_examples = [dict(examples[0], policy_target_index=65)]
     with pytest.raises(ValueError, match="policy_target_index"):
@@ -442,6 +442,24 @@ def test_prepare_learning_batch_rejects_nonzero_history_and_invalid_examples() -
             bad_examples,
             {
                 "history_len": 0,
+                "include_legal_mask": False,
+                "include_phase_plane": True,
+                "include_turn_plane": True,
+                "perspective": "side_to_move",
+            },
+        )
+
+
+def test_prepare_learning_batch_rejects_invalid_history_pass() -> None:
+    trace = play_random_game(6, {"max_plies": 1})
+    examples = packed_supervised_examples_from_trace(trace)
+    bad_examples = [dict(examples[0], moves_until_here=[None])]
+
+    with pytest.raises(ValueError, match="InvalidHistoryPass"):
+        prepare_planes_learning_batch(
+            bad_examples,
+            {
+                "history_len": 1,
                 "include_legal_mask": False,
                 "include_phase_plane": True,
                 "include_turn_plane": True,
