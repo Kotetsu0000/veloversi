@@ -43,7 +43,14 @@ uv run python examples/generate_training_data.py --output-dir examples/generated
 
 ## `pytorch_dataloader.py`
 
-保存済み JSONL ディレクトリを読み、`prepare_planes_learning_batch` を使って PyTorch `Dataset` / `DataLoader` に流す参考例です。
+保存済み JSONL ディレクトリを読み、PyTorch の map-style `Dataset` / `DataLoader` に流す参考例です。
+
+- 1 index = 1 サンプル
+- batch 化は `collate_fn`
+- `value-only`
+- `policy + value`
+- CNN 用 `(B, 3, 8, 8)`
+- flat 用 `(B, 192)`
 
 実行には PyTorch が必要です。リポジトリの標準依存には含めていません。
 
@@ -51,6 +58,12 @@ uv run python examples/generate_training_data.py --output-dir examples/generated
 
 ```bash
 uv run python -m py_compile examples/pytorch_dataloader.py
+```
+
+PyTorch 導入済み環境での実行例:
+
+```bash
+uv run python examples/pytorch_dataloader.py
 ```
 
 ## `game_recording.py`

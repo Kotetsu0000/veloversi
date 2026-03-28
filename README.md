@@ -134,6 +134,12 @@ Step 23 では学習用 batch API を追加しています。
 返り値は `features`、`value_targets`、`policy_targets`、`legal_move_masks` を持つ `dict` です。
 shape は planes が `(B, C, 8, 8)`、flat が `(B, F)`、legal move mask が `(B, 64)` です。
 
+Step 26 では PyTorch 接続向けの model input API を追加しています。
+公開するのは `prepare_cnn_model_input`、`prepare_cnn_model_input_batch`、`prepare_flat_model_input`、`prepare_flat_model_input_batch` です。
+`Board` と recording の両方を受け、recording の場合は現在局面を使います。
+CNN 用は `(B, 3, 8, 8)` で、自分の石 / 相手の石 / 合法手を返します。
+flat 用は `(B, 192)` で、自分の石 64 / 相手の石 64 / 合法手 64 を返します。
+
 Step 25 では recording / game record API を追加しています。
 公開するのは `random_start_board`、`start_game_recording`、`record_move`、`record_pass`、`current_board`、`finish_game_recording`、`append_game_record`、`load_game_records` です。
 recording は immutable で、Python では `dict` として扱います。
@@ -163,6 +169,10 @@ uv run python examples/generate_training_data.py --output-dir examples/generated
 
 ```bash
 uv run python examples/game_recording.py
+```
+
+```bash
+uv run python -m py_compile examples/pytorch_dataloader.py
 ```
 
 ## Release artifact

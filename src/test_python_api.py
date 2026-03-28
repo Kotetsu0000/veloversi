@@ -29,6 +29,8 @@ from veloversi import (
     packed_supervised_examples_from_trace,
     packed_supervised_examples_from_traces,
     play_random_game,
+    prepare_cnn_model_input,
+    prepare_cnn_model_input_batch,
     random_start_board,
     record_move,
     record_pass,
@@ -37,6 +39,8 @@ from veloversi import (
     append_game_record,
     current_board,
     prepare_flat_learning_batch,
+    prepare_flat_model_input,
+    prepare_flat_model_input_batch,
     prepare_planes_learning_batch,
     sample_reachable_positions,
     supervised_examples_from_trace,
@@ -516,6 +520,50 @@ def test_encode_planes_and_flat_features_return_float32_arrays() -> None:
     assert flat.dtype == np.float32
     assert planes.shape == (9, 8, 8)
     assert flat.shape == (128 * 3 + 64 + 1 + 1,)
+
+
+def test_prepare_cnn_model_input_returns_batch_first_three_planes() -> None:
+    batch = prepare_cnn_model_input(initial_board())
+
+    assert batch.shape == (1, 3, 8, 8)
+    assert batch.dtype == np.float32
+    assert float(batch[0, 0].sum()) == 2.0
+    assert float(batch[0, 1].sum()) == 2.0
+
+    legal_squares = {
+        idx for idx, value in enumerate(batch[0, 2].reshape(64).tolist()) if value == 1.0
+    }
+    assert legal_squares == {19, 26, 37, 44}
+
+
+def test_prepare_model_input_accepts_recording_dict() -> None:
+    record = start_game_recording(initial_board())
+    record = record_move(record, 19)
+
+    cnn = prepare_cnn_model_input(record)
+    flat = prepare_flat_model_input(record)
+
+    assert cnn.shape == (1, 3, 8, 8)
+    assert flat.shape == (1, 192)
+    assert np.array_equal(cnn, prepare_cnn_model_input(current_board(record)))
+    assert np.array_equal(flat, prepare_flat_model_input(current_board(record)))
+
+
+def test_prepare_model_input_batch_is_batch_first() -> None:
+    board = initial_board()
+    moved = apply_move(board, 19)
+    record = start_game_recording(moved)
+
+    cnn = prepare_cnn_model_input_batch([board, record])
+    flat = prepare_flat_model_input_batch([board, record])
+
+    assert cnn.shape == (2, 3, 8, 8)
+    assert flat.shape == (2, 192)
+
+
+def test_prepare_model_input_rejects_invalid_value() -> None:
+    with pytest.raises(TypeError):
+        prepare_cnn_model_input({"bad": "record"})
 
 
 def test_encode_feature_batches_match_single_position_results() -> None:

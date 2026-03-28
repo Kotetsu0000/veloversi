@@ -77,13 +77,13 @@
 
 ## 受け入れ条件
 
-- [ ] `Dataset.__getitem__` が 1 サンプルだけ返す
-- [ ] `DataLoader(batch_size=N)` を変えても同じ dataset を使える
-- [ ] `collate_fn` で batch 化している
-- [ ] `value-only` 用 example がある
-- [ ] `policy + value` 用 example がある
-- [ ] `board | recording` から現在局面ベースの入力を作る公開 API がある
-- [ ] README / examples README が現状と一致する
+- [x] `Dataset.__getitem__` が 1 サンプルだけ返す
+- [x] `DataLoader(batch_size=N)` を変えても同じ dataset を使える
+- [x] `collate_fn` で batch 化している
+- [x] `value-only` 用 example がある
+- [x] `policy + value` 用 example がある
+- [x] `board | recording` から現在局面ベースの入力を作る公開 API がある
+- [x] README / examples README が現状と一致する
 
 ## 実装方針
 
@@ -129,3 +129,29 @@
 - `history_len > 0` は Step 24 未完了なので、この step では扱わない前提を明記する必要がある
 - `recording` を直接受ける正式 API を入れるため、`board` と `recording` の判定規約を明確にする必要がある
 - pass は policy 学習から除外するため、policy 用 DataLoader の filter 条件を分かりやすく保つ必要がある
+
+## 実装結果
+
+- Python 公開 API に次を追加した
+  - `prepare_cnn_model_input`
+  - `prepare_cnn_model_input_batch`
+  - `prepare_flat_model_input`
+  - `prepare_flat_model_input_batch`
+- `board` と `recording` の両方を受け、`recording` は現在局面を使う
+- CNN 入力は `(B, 3, 8, 8)` で、自分の石 / 相手の石 / 合法手の 3ch にした
+- flat 入力は `(B, 192)` で、自分の石 64 / 相手の石 64 / 合法手 64 にした
+- `examples/pytorch_dataloader.py` を map-style dataset + custom `collate_fn` 前提で作り直した
+- `value-only` と `policy + value` を別 dataset / collate として分けた
+- `policy + value` では pass と target なしを除外し、value target は `final_margin_from_side_to_move / 64.0` に正規化した
+
+## 検証結果
+
+- `make check`: 成功
+- Rust: `122 passed; 0 failed; 6 ignored`
+- Python: `46 passed`
+- `uv run python -m py_compile examples/pytorch_dataloader.py`: 成功
+
+## 残課題
+
+- `history_len > 0` を含む学習 batch は未実装
+- PyTorch runtime 自体を使った example 実行確認は、環境依存のためこの step では行っていない

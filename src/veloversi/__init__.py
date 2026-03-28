@@ -78,6 +78,10 @@ __all__ = [
     "packed_supervised_examples_from_traces",
     "prepare_planes_learning_batch",
     "prepare_flat_learning_batch",
+    "prepare_cnn_model_input",
+    "prepare_cnn_model_input_batch",
+    "prepare_flat_model_input",
+    "prepare_flat_model_input_batch",
     "unpack_board",
     "transform_board",
     "transform_square",
@@ -228,6 +232,87 @@ def load_game_records(path: str) -> list[dict[str, object]]:
     if type(path) is not str:
         raise ValueError("path must be a str")
     return [_game_record_from_parts(parts) for parts in _load_game_records_parts(path)]
+
+
+def _board_from_board_or_record(value: object) -> Board:
+    if isinstance(value, Board):
+        return value
+    if type(value) is dict:
+        typed_record = _validate_recording(value)
+        current = typed_record.get("current_board")
+        if isinstance(current, Board):
+            return current
+    raise TypeError("value must be a Board or recording dict")
+
+
+def _boards_from_board_or_record_batch(values: object) -> list[Board]:
+    if type(values) is not list:
+        raise ValueError("values must be a list[Board | dict]")
+    return [_board_from_board_or_record(value) for value in cast(list[object], values)]
+
+
+def _cnn_planes_for_board(board: Board) -> np.ndarray:
+    self_plane = np.zeros((8, 8), dtype=np.float32)
+    opp_plane = np.zeros((8, 8), dtype=np.float32)
+    legal_plane = np.zeros((8, 8), dtype=np.float32)
+
+    if board.side_to_move == "black":
+        self_bits = board.black_bits
+        opp_bits = board.white_bits
+    else:
+        self_bits = board.white_bits
+        opp_bits = board.black_bits
+    legal_bits = generate_legal_moves(board)
+
+    for plane, bits in (
+        (self_plane, self_bits),
+        (opp_plane, opp_bits),
+        (legal_plane, legal_bits),
+    ):
+        current_bits = bits
+        while current_bits != 0:
+            square = (current_bits & -current_bits).bit_length() - 1
+            plane[square // 8, square % 8] = 1.0
+            current_bits &= current_bits - 1
+
+    return np.stack((self_plane, opp_plane, legal_plane), axis=0)
+
+
+def _flat_features_for_board(board: Board) -> np.ndarray:
+    planes = _cnn_planes_for_board(board)
+    return np.concatenate(
+        (
+            planes[0].reshape(64),
+            planes[1].reshape(64),
+            planes[2].reshape(64),
+        )
+    ).astype(np.float32, copy=False)
+
+
+def prepare_cnn_model_input(board_or_record: object) -> np.ndarray:
+    board = _board_from_board_or_record(board_or_record)
+    return _cnn_planes_for_board(board)[np.newaxis, ...]
+
+
+def prepare_cnn_model_input_batch(values: list[object]) -> np.ndarray:
+    boards = _boards_from_board_or_record_batch(values)
+    return np.stack([_cnn_planes_for_board(board) for board in boards], axis=0).astype(
+        np.float32,
+        copy=False,
+    )
+
+
+def prepare_flat_model_input(board_or_record: object) -> np.ndarray:
+    board = _board_from_board_or_record(board_or_record)
+    return _flat_features_for_board(board)[np.newaxis, ...]
+
+
+def prepare_flat_model_input_batch(values: list[object]) -> np.ndarray:
+    boards = _boards_from_board_or_record_batch(values)
+    return np.stack([_flat_features_for_board(board) for board in boards], axis=0).astype(
+        np.float32,
+        copy=False,
+    )
 
 
 def _validate_random_game_trace(trace: object) -> dict[object, object]:
