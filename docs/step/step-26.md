@@ -8,7 +8,7 @@
 
 - 1 index = 1 盤面サンプルにする
 - `DataLoader(batch_size=...)` で可変 batch を自然に扱えるようにする
-- value 学習用と policy 学習用の両方で使える例にする
+- `policy + value` 学習用と `value-only` 学習用の両方で使える例にする
 
 ## version 方針
 
@@ -21,8 +21,8 @@
 - `Dataset.__getitem__` は 1 サンプルだけ返すようにする
 - batch 化は `DataLoader` の `batch_size` と `collate_fn` に委ねる
 - `board` / `recording` の現在局面から直接モデル入力を作る正式 API を追加する
-- value 学習用の DataLoader 例を追加 / 整理する
-- policy 学習用の DataLoader 例を追加 / 整理する
+- `value-only` 用の DataLoader 例を追加 / 整理する
+- `policy + value` 用の DataLoader 例を追加 / 整理する
 - README / `examples/README.md` を必要最小限更新する
 
 ## このステップの対象範囲
@@ -32,6 +32,7 @@
 - `examples/pytorch_dataloader.py`
 - `examples/README.md`
 - `README.md`
+- Python 側の model input / target helper
 
 ### 対象外
 
@@ -48,7 +49,7 @@
 - `batch_size` は `DataLoader` 側で可変にする
 - batch 化は `collate_fn` で行う
 - `prepare_planes_learning_batch` / `prepare_flat_learning_batch` は `collate_fn` 内でまとめて呼ぶ
-- value 用と policy 用は example 上で分けて見せる
+- `value-only` 用と `policy + value` 用は example 上で分けて見せる
 - feature は少なくとも次の2系統を扱う
   - planes: `(B, C, 8, 8)`
   - flat: `(B, F)`
@@ -62,14 +63,19 @@
   - CNN 用入力
   - flat/NNUE 風入力
   を返す正式 API を用意する
+- value target は `final_margin_from_side_to_move / 64.0` にする
+- DataLoader には少なくとも次の2モードを用意する
+  - `value-only`
+  - `policy + value`
 
 ## 受け入れ条件
 
 - [ ] `Dataset.__getitem__` が 1 サンプルだけ返す
 - [ ] `DataLoader(batch_size=N)` を変えても同じ dataset を使える
 - [ ] `collate_fn` で batch 化している
-- [ ] value 用 example がある
-- [ ] policy 用 example がある
+- [ ] `value-only` 用 example がある
+- [ ] `policy + value` 用 example がある
+- [ ] `board | recording` から現在局面ベースの入力を作る公開 API がある
 - [ ] README / examples README が現状と一致する
 
 ## 実装方針
@@ -77,12 +83,20 @@
 - 保存済み JSONL は 1 レコード = 1 サンプルとして扱う
 - `Dataset.__getitem__` は生の record `dict` を返す
 - `collate_fn` が `list[dict]` をまとめて `prepare_*_learning_batch` へ渡す
-- value 用 / policy 用で返す項目は分ける
+- `value-only` / `policy + value` で返す項目は分ける
 - `legal_move_masks` は policy 用で明示的に返す
 - `B == 1` でも同じ DataLoader / collate_fn を使う
 - value target の正規化は `collate_fn` 側で行う
+  - `normalized_margin = final_margin_from_side_to_move / 64.0`
+  - 範囲は `[-1, 1]`
 - `board | recording` を受けるモデル入力 API は convenience helper ではなく公開 API として定義する
 - `recording` を受けた場合は現在局面を使う
+- policy 学習では pass を推論対象にしない
+  - `policy_target_index == 64` は除外
+  - `policy_target_index == -1` も除外
+  - `legal_move_masks` は `(B, 64)` のまま維持する
+- pass 局面は `value-only` では使う
+- `policy + value` は policy 有効サンプルのみを対象にする
 
 ## PyTorch 公式情報との対応
 
@@ -96,13 +110,14 @@
 
 - `__getitem__` の中で `prepare_planes_learning_batch([record], ...)` を呼んでおり、実質的に 1 サンプルずつ疑似 batch 化している
 - `DataLoader` の `batch_size` は、その後 `default_collate` が積むだけなので、feature 生成責務の位置が不自然
-- value 用 / policy 用の責務分離が弱い
+- `value-only` / `policy + value` の責務分離が弱い
 - `legal_move_masks` を出していない
 - 単発のモデル入力 API が無く、`board` や `recording` からそのまま PyTorch 入力に繋げにくい
 
 ## 懸念点
 
 - `collate_fn` に feature 生成を寄せると example は正しくなる一方、利用者に「どこで重い処理が走るか」を明示する必要がある
-- value 用と policy 用を1つの example に詰め込みすぎると読みづらい
+- `value-only` と `policy + value` の両方を自然に切り替えられる API にしないと、example が読みにくくなる
 - `history_len > 0` は Step 24 未完了なので、この step では扱わない前提を明記する必要がある
 - `recording` を直接受ける正式 API を入れるため、`board` と `recording` の判定規約を明確にする必要がある
+- pass は policy 学習から除外するため、policy 用 DataLoader の filter 条件を分かりやすく保つ必要がある
