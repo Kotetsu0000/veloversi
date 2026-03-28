@@ -67,6 +67,13 @@
 - DataLoader には少なくとも次の2モードを用意する
   - `value-only`
   - `policy + value`
+- `final_margin_from_side_to_move` は current board の手番と `final_margin_from_black` から復元する
+- `policy + value` は policy 有効 sample のみを使う
+- model input API の naming は次を基本にする
+  - `prepare_cnn_model_input`
+  - `prepare_flat_model_input`
+  - `prepare_cnn_model_input_batch`
+  - `prepare_flat_model_input_batch`
 
 ## 受け入れ条件
 
@@ -97,6 +104,7 @@
   - `legal_move_masks` は `(B, 64)` のまま維持する
 - pass 局面は `value-only` では使う
 - `policy + value` は policy 有効サンプルのみを対象にする
+- `value-only` は全 sample を対象にする
 
 ## PyTorch 公式情報との対応
 
