@@ -14,8 +14,9 @@ use crate::{
     FeatureConfig, FeaturePerspective, Move, PackedBoard, PackedSupervisedExample, RandomGameTrace,
     RandomPlayConfig, SupervisedExample, encode_flat_features, encode_flat_features_batch,
     encode_planes, encode_planes_batch, pack_board, packed_supervised_examples_from_trace,
-    packed_supervised_examples_from_traces, play_random_game, sample_reachable_positions,
-    supervised_examples_from_trace, supervised_examples_from_traces, unpack_board,
+    packed_supervised_examples_from_traces, play_random_game, prepare_flat_learning_batch,
+    prepare_planes_learning_batch, sample_reachable_positions, supervised_examples_from_trace,
+    supervised_examples_from_traces, unpack_board,
 };
 
 #[pyclass(name = "Board")]
@@ -167,6 +168,25 @@ type PyRandomGameTraceParts = (
 type PyPackedSupervisedExampleParts = (PyBoardBits, u16, Vec<Option<u8>>, &'static str, i8, i8);
 
 #[cfg(not(any(test, coverage)))]
+type PyPackedSupervisedExampleInput = ((u64, u64, String), u16, Vec<Option<u8>>, String, i8, i8);
+
+#[cfg(not(any(test, coverage)))]
+type PyPreparedPlanesBatch<'py> = (
+    Bound<'py, PyArray4<f32>>,
+    Bound<'py, PyArray1<f32>>,
+    Bound<'py, PyArray1<i16>>,
+    Bound<'py, PyArray2<f32>>,
+);
+
+#[cfg(not(any(test, coverage)))]
+type PyPreparedFlatBatch<'py> = (
+    Bound<'py, PyArray2<f32>>,
+    Bound<'py, PyArray1<f32>>,
+    Bound<'py, PyArray1<i16>>,
+    Bound<'py, PyArray2<f32>>,
+);
+
+#[cfg(not(any(test, coverage)))]
 fn supervised_example_to_py_parts(example: &SupervisedExample) -> PySupervisedExampleParts {
     (
         board_to_py_tuple(&example.board),
@@ -194,6 +214,40 @@ fn packed_supervised_example_to_py_parts(
         example.final_margin_from_black,
         example.policy_target_index,
     )
+}
+
+#[cfg(not(any(test, coverage)))]
+fn packed_supervised_example_from_py_parts(
+    board_bits: (u64, u64, String),
+    ply: u16,
+    moves_until_here: Vec<Option<u8>>,
+    final_result: &str,
+    final_margin_from_black: i8,
+    policy_target_index: i8,
+) -> PyResult<PackedSupervisedExample> {
+    let board = PackedBoard {
+        black_bits: board_bits.0,
+        white_bits: board_bits.1,
+        side_to_move: py_str_to_color(&board_bits.2)?,
+    };
+    let final_result = match final_result {
+        "black_win" => crate::GameResult::BlackWin,
+        "white_win" => crate::GameResult::WhiteWin,
+        "draw" => crate::GameResult::Draw,
+        _ => {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "final_result must be 'black_win', 'white_win', or 'draw'",
+            ));
+        }
+    };
+    Ok(PackedSupervisedExample {
+        board,
+        ply,
+        moves_until_here,
+        final_result,
+        final_margin_from_black,
+        policy_target_index,
+    })
 }
 
 #[cfg(not(any(test, coverage)))]
@@ -468,6 +522,137 @@ fn packed_supervised_examples_from_traces_parts_py(
         .collect())
 }
 
+#[pyfunction(name = "_prepare_planes_learning_batch_parts")]
+#[cfg(not(any(test, coverage)))]
+#[allow(clippy::too_many_arguments)]
+fn prepare_planes_learning_batch_parts_py<'py>(
+    py: Python<'py>,
+    examples: Vec<PyPackedSupervisedExampleInput>,
+    history_len: usize,
+    include_legal_mask: bool,
+    include_phase_plane: bool,
+    include_turn_plane: bool,
+    perspective: &str,
+) -> PyResult<PyPreparedPlanesBatch<'py>> {
+    let config = feature_config_from_parts(
+        history_len,
+        include_legal_mask,
+        include_phase_plane,
+        include_turn_plane,
+        perspective,
+    )?;
+    let rust_examples = examples
+        .into_iter()
+        .map(
+            |(
+                board_bits,
+                ply,
+                moves_until_here,
+                final_result,
+                final_margin_from_black,
+                policy_target_index,
+            )| {
+                packed_supervised_example_from_py_parts(
+                    board_bits,
+                    ply,
+                    moves_until_here,
+                    &final_result,
+                    final_margin_from_black,
+                    policy_target_index,
+                )
+            },
+        )
+        .collect::<PyResult<Vec<_>>>()?;
+    let batch = prepare_planes_learning_batch(&rust_examples, &config)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(format!("{err:?}")))?;
+
+    let features = Array4::from_shape_vec(
+        (
+            batch.features.batch,
+            batch.features.channels,
+            batch.features.height,
+            batch.features.width,
+        ),
+        batch.features.data_f32,
+    )
+    .expect("planes batch shape must be valid")
+    .into_pyarray(py);
+    let value_targets = Array1::from_shape_vec(batch.value_targets.len(), batch.value_targets)
+        .expect("value target shape must be valid")
+        .into_pyarray(py);
+    let policy_targets = Array1::from_shape_vec(batch.policy_targets.len(), batch.policy_targets)
+        .expect("policy target shape must be valid")
+        .into_pyarray(py);
+    let legal_move_masks =
+        Array2::from_shape_vec((rust_examples.len(), 64), batch.legal_move_masks)
+            .expect("legal move mask shape must be valid")
+            .into_pyarray(py);
+    Ok((features, value_targets, policy_targets, legal_move_masks))
+}
+
+#[pyfunction(name = "_prepare_flat_learning_batch_parts")]
+#[cfg(not(any(test, coverage)))]
+#[allow(clippy::too_many_arguments)]
+fn prepare_flat_learning_batch_parts_py<'py>(
+    py: Python<'py>,
+    examples: Vec<PyPackedSupervisedExampleInput>,
+    history_len: usize,
+    include_legal_mask: bool,
+    include_phase_plane: bool,
+    include_turn_plane: bool,
+    perspective: &str,
+) -> PyResult<PyPreparedFlatBatch<'py>> {
+    let config = feature_config_from_parts(
+        history_len,
+        include_legal_mask,
+        include_phase_plane,
+        include_turn_plane,
+        perspective,
+    )?;
+    let rust_examples = examples
+        .into_iter()
+        .map(
+            |(
+                board_bits,
+                ply,
+                moves_until_here,
+                final_result,
+                final_margin_from_black,
+                policy_target_index,
+            )| {
+                packed_supervised_example_from_py_parts(
+                    board_bits,
+                    ply,
+                    moves_until_here,
+                    &final_result,
+                    final_margin_from_black,
+                    policy_target_index,
+                )
+            },
+        )
+        .collect::<PyResult<Vec<_>>>()?;
+    let batch = prepare_flat_learning_batch(&rust_examples, &config)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(format!("{err:?}")))?;
+
+    let features = Array2::from_shape_vec(
+        (batch.features.batch, batch.features.len),
+        batch.features.data_f32,
+    )
+    .expect("flat batch shape must be valid")
+    .into_pyarray(py);
+    let value_targets = Array1::from_shape_vec(batch.value_targets.len(), batch.value_targets)
+        .expect("value target shape must be valid")
+        .into_pyarray(py);
+    let policy_targets = Array1::from_shape_vec(batch.policy_targets.len(), batch.policy_targets)
+        .expect("policy target shape must be valid")
+        .into_pyarray(py);
+    let legal_move_masks =
+        Array2::from_shape_vec((rust_examples.len(), 64), batch.legal_move_masks)
+            .expect("legal move mask shape must be valid")
+            .into_pyarray(py);
+    Ok((features, value_targets, policy_targets, legal_move_masks))
+}
+
 #[pyfunction(name = "_encode_planes_parts")]
 #[cfg(not(any(test, coverage)))]
 #[allow(clippy::too_many_arguments)]
@@ -715,6 +900,16 @@ fn _core(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(not(any(test, coverage)))]
     module.add_function(wrap_pyfunction!(
         packed_supervised_examples_from_traces_parts_py,
+        module
+    )?)?;
+    #[cfg(not(any(test, coverage)))]
+    module.add_function(wrap_pyfunction!(
+        prepare_planes_learning_batch_parts_py,
+        module
+    )?)?;
+    #[cfg(not(any(test, coverage)))]
+    module.add_function(wrap_pyfunction!(
+        prepare_flat_learning_batch_parts_py,
         module
     )?)?;
     #[cfg(not(any(test, coverage)))]

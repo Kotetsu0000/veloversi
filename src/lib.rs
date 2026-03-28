@@ -1,6 +1,7 @@
 pub mod engine;
 mod feature;
 mod flip_tables;
+mod learning;
 mod python;
 mod random_play;
 mod search;
@@ -17,6 +18,10 @@ pub use feature::{
     EncodedFlatFeatures, EncodedFlatFeaturesBatch, EncodedPlanes, EncodedPlanesBatch,
     FeatureConfig, FeaturePerspective, encode_flat_features, encode_flat_features_batch,
     encode_planes, encode_planes_batch,
+};
+pub use learning::{
+    LearningBatchError, PreparedFlatBatch, PreparedPlanesBatch, prepare_flat_learning_batch,
+    prepare_planes_learning_batch,
 };
 pub use random_play::{
     PackedSupervisedExample, PositionSamplingConfig, RandomGameTrace, RandomPlayConfig,

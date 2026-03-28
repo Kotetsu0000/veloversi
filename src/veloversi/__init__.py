@@ -9,6 +9,8 @@ from ._core import (
     _encode_planes_parts,
     _packed_supervised_examples_from_trace_parts,
     _packed_supervised_examples_from_traces_parts,
+    _prepare_flat_learning_batch_parts,
+    _prepare_planes_learning_batch_parts,
     _play_random_game_parts,
     _sample_reachable_positions_parts,
     _supervised_examples_from_trace_parts,
@@ -59,6 +61,8 @@ __all__ = [
     "supervised_examples_from_traces",
     "packed_supervised_examples_from_trace",
     "packed_supervised_examples_from_traces",
+    "prepare_planes_learning_batch",
+    "prepare_flat_learning_batch",
     "unpack_board",
     "transform_board",
     "transform_square",
@@ -278,6 +282,58 @@ def _packed_example_from_parts(
     }
 
 
+def _validate_packed_supervised_example(example: object) -> dict[object, object]:
+    if type(example) is not dict:
+        raise ValueError("example must be a dict")
+    return cast(dict[object, object], example)
+
+
+def _packed_example_to_core_parts(
+    example: object,
+) -> tuple[tuple[int, int, str], int, list[int | None], str, int, int]:
+    typed_example = _validate_packed_supervised_example(example)
+    board = typed_example.get("board")
+    ply = typed_example.get("ply")
+    moves_until_here = typed_example.get("moves_until_here")
+    final_result = typed_example.get("final_result")
+    final_margin_from_black = typed_example.get("final_margin_from_black")
+    policy_target_index = typed_example.get("policy_target_index")
+
+    if type(board) is not tuple or len(board) != 3:
+        raise ValueError("example['board'] must be tuple[int, int, str]")
+    black_bits, white_bits, side_to_move = board
+    if type(black_bits) is not int or type(white_bits) is not int or type(side_to_move) is not str:
+        raise ValueError("example['board'] must be tuple[int, int, str]")
+    if type(ply) is not int or not (0 <= ply <= 0xFFFF):
+        raise ValueError("example['ply'] must be an int in 0..65535")
+    if type(moves_until_here) is not list:
+        raise ValueError("example['moves_until_here'] must be a list[int | None]")
+    if type(final_result) is not str or final_result not in {"black_win", "white_win", "draw"}:
+        raise ValueError("example['final_result'] must be 'black_win', 'white_win', or 'draw'")
+    if type(final_margin_from_black) is not int:
+        raise ValueError("example['final_margin_from_black'] must be an int")
+    if type(policy_target_index) is not int or not (-1 <= policy_target_index <= 64):
+        raise ValueError("example['policy_target_index'] must be an int in -1..64")
+
+    validated_moves: list[int | None] = []
+    for move in moves_until_here:
+        if move is None:
+            validated_moves.append(None)
+        elif type(move) is int and 0 <= move <= 63:
+            validated_moves.append(move)
+        else:
+            raise ValueError("example['moves_until_here'] must contain int in 0..63 or None")
+
+    return (
+        (black_bits, white_bits, side_to_move),
+        ply,
+        validated_moves,
+        final_result,
+        final_margin_from_black,
+        policy_target_index,
+    )
+
+
 def supervised_examples_from_trace(trace: dict) -> list[dict[str, object]]:
     return [
         _example_from_parts(parts)
@@ -312,6 +368,38 @@ def packed_supervised_examples_from_traces(traces: list[dict]) -> list[dict[str,
             [_trace_to_core_parts(trace) for trace in traces]
         )
     ]
+
+
+def prepare_planes_learning_batch(examples: list[dict], config: dict) -> dict[str, np.ndarray]:
+    if type(examples) is not list:
+        raise ValueError("examples must be a list[dict]")
+    features, value_targets, policy_targets, legal_move_masks = (
+        _prepare_planes_learning_batch_parts(
+            [_packed_example_to_core_parts(example) for example in examples],
+            *_validate_feature_config(config),
+        )
+    )
+    return {
+        "features": features,
+        "value_targets": value_targets,
+        "policy_targets": policy_targets,
+        "legal_move_masks": legal_move_masks,
+    }
+
+
+def prepare_flat_learning_batch(examples: list[dict], config: dict) -> dict[str, np.ndarray]:
+    if type(examples) is not list:
+        raise ValueError("examples must be a list[dict]")
+    features, value_targets, policy_targets, legal_move_masks = _prepare_flat_learning_batch_parts(
+        [_packed_example_to_core_parts(example) for example in examples],
+        *_validate_feature_config(config),
+    )
+    return {
+        "features": features,
+        "value_targets": value_targets,
+        "policy_targets": policy_targets,
+        "legal_move_masks": legal_move_masks,
+    }
 
 
 def encode_planes(board: Board, history: list[Board], config: dict) -> np.ndarray:

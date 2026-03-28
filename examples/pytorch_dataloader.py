@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import veloversi as vv
@@ -24,17 +24,6 @@ FEATURE_CONFIG = {
     "perspective": "side_to_move",
 }
 
-
-def board_dict_to_board(board_data: dict[str, Any]) -> vv.Board:
-    return vv.unpack_board(
-        (
-            int(board_data["black_bits"]),
-            int(board_data["white_bits"]),
-            str(board_data["side_to_move"]),
-        )
-    )
-
-
 class ReversiTrainingDataset(Dataset[dict[str, torch.Tensor]]):
     def __init__(self, data_dir: str | Path) -> None:
         self.records: list[dict[str, Any]] = []
@@ -50,11 +39,13 @@ class ReversiTrainingDataset(Dataset[dict[str, torch.Tensor]]):
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         record = self.records[index]
-        board = board_dict_to_board(record["board"])
-        planes = vv.encode_planes(board, [], FEATURE_CONFIG)
-        value_target = np.float32(record["final_margin_from_black"])
-        policy_target = np.int64(record["policy_target_index"])
-        has_policy_target = np.float32(1.0 if record["has_policy_target"] else 0.0)
+        batch = vv.prepare_planes_learning_batch([record], FEATURE_CONFIG)
+        planes = cast(np.ndarray, batch["features"])[0]
+        value_target = np.float32(cast(np.ndarray, batch["value_targets"])[0])
+        policy_target = np.int64(cast(np.ndarray, batch["policy_targets"])[0])
+        has_policy_target = np.float32(
+            1.0 if record["has_policy_target"] else 0.0
+        )
 
         return {
             "planes": torch.from_numpy(planes),

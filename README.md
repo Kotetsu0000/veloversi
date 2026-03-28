@@ -129,6 +129,11 @@ Step 22 では保存向けの supervised example API を追加しています。
 policy ラベルとして `policy_target_index` を持ちます。
 `policy_target_index` は `-1` が target なし、`0..63` が次手のマス、`64` が pass です。
 
+Step 23 では学習用 batch API を追加しています。
+公開するのは `prepare_planes_learning_batch`、`prepare_flat_learning_batch` です。
+返り値は `features`、`value_targets`、`policy_targets`、`legal_move_masks` を持つ `dict` です。
+shape は planes が `(B, C, 8, 8)`、flat が `(B, F)`、legal move mask が `(B, 64)` です。
+
 配布用の `whl` でも、バイナリ全体を特定 CPU 向けに固定せず、実行時に CPU 機能を見て適切な経路を選ぶ構成にしています。
 
 現在の Perft 実装では、`ref` 配下の参考実装を参照しつつ、合法手生成と反転計算を oriented ビットボード寄りのホットパスへ寄せています。あわせて、`board_status` を経由しない Perft 専用経路、深さ 1 / 2 / 3 の末端特殊化、長時間検証時のルート手単位並列化を入れています。

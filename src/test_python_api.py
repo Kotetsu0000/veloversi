@@ -27,6 +27,8 @@ from veloversi import (
     packed_supervised_examples_from_trace,
     packed_supervised_examples_from_traces,
     play_random_game,
+    prepare_flat_learning_batch,
+    prepare_planes_learning_batch,
     sample_reachable_positions,
     supervised_examples_from_trace,
     supervised_examples_from_traces,
@@ -358,6 +360,81 @@ def test_packed_supervised_examples_from_traces_concatenates_examples() -> None:
     )
 
     assert merged == separate
+
+
+def test_prepare_planes_learning_batch_returns_expected_shapes() -> None:
+    trace = play_random_game(7, {"max_plies": 4})
+    examples = packed_supervised_examples_from_trace(trace)
+    batch = prepare_planes_learning_batch(
+        examples,
+        {
+            "history_len": 0,
+            "include_legal_mask": False,
+            "include_phase_plane": True,
+            "include_turn_plane": True,
+            "perspective": "side_to_move",
+        },
+    )
+
+    assert batch["features"].shape[0] == len(examples)
+    assert batch["features"].shape[2:] == (8, 8)
+    assert batch["value_targets"].shape == (len(examples),)
+    assert batch["policy_targets"].shape == (len(examples),)
+    assert batch["legal_move_masks"].shape == (len(examples), 64)
+    assert batch["features"].dtype == np.float32
+    assert batch["value_targets"].dtype == np.float32
+    assert batch["policy_targets"].dtype == np.int16
+    assert batch["legal_move_masks"].dtype == np.float32
+
+
+def test_prepare_flat_learning_batch_returns_expected_shapes_and_b_equals_one() -> None:
+    trace = play_random_game(9, {"max_plies": 2})
+    examples = packed_supervised_examples_from_trace(trace)[:1]
+    batch = prepare_flat_learning_batch(
+        examples,
+        {
+            "history_len": 0,
+            "include_legal_mask": False,
+            "include_phase_plane": True,
+            "include_turn_plane": True,
+            "perspective": "side_to_move",
+        },
+    )
+
+    assert batch["features"].shape[0] == 1
+    assert batch["value_targets"].shape == (1,)
+    assert batch["policy_targets"].shape == (1,)
+    assert batch["legal_move_masks"].shape == (1, 64)
+
+
+def test_prepare_learning_batch_rejects_nonzero_history_and_invalid_examples() -> None:
+    trace = play_random_game(5, {"max_plies": 2})
+    examples = packed_supervised_examples_from_trace(trace)
+
+    with pytest.raises(ValueError, match="HistoryNotSupported"):
+        prepare_planes_learning_batch(
+            examples,
+            {
+                "history_len": 1,
+                "include_legal_mask": False,
+                "include_phase_plane": True,
+                "include_turn_plane": True,
+                "perspective": "side_to_move",
+            },
+        )
+
+    bad_examples = [dict(examples[0], policy_target_index=65)]
+    with pytest.raises(ValueError, match="policy_target_index"):
+        prepare_flat_learning_batch(
+            bad_examples,
+            {
+                "history_len": 0,
+                "include_legal_mask": False,
+                "include_phase_plane": True,
+                "include_turn_plane": True,
+                "perspective": "side_to_move",
+            },
+        )
 
 
 def test_encode_planes_and_flat_features_return_float32_arrays() -> None:

@@ -43,7 +43,7 @@ uv run python examples/generate_training_data.py --output-dir examples/generated
 
 ## `pytorch_dataloader.py`
 
-保存済み JSONL ディレクトリを読み、`encode_planes` を使って PyTorch `Dataset` / `DataLoader` に流す参考例です。
+保存済み JSONL ディレクトリを読み、`prepare_planes_learning_batch` を使って PyTorch `Dataset` / `DataLoader` に流す参考例です。
 
 実行には PyTorch が必要です。リポジトリの標準依存には含めていません。
 
