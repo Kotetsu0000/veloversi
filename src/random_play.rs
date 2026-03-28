@@ -18,6 +18,15 @@ pub struct RandomGameTrace {
     pub reached_terminal: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SupervisedExample {
+    pub board: Board,
+    pub ply: u16,
+    pub moves_until_here: Vec<Option<Move>>,
+    pub final_result: GameResult,
+    pub final_margin_from_black: i8,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PositionSamplingConfig {
     pub num_positions: u32,
@@ -151,11 +160,35 @@ pub fn sample_reachable_positions(seed: u64, config: &PositionSamplingConfig) ->
     positions
 }
 
+pub fn supervised_examples_from_trace(trace: &RandomGameTrace) -> Vec<SupervisedExample> {
+    trace
+        .boards
+        .iter()
+        .enumerate()
+        .map(|(ply, board)| SupervisedExample {
+            board: *board,
+            ply: ply as u16,
+            moves_until_here: trace.moves[..ply].to_vec(),
+            final_result: trace.final_result,
+            final_margin_from_black: trace.final_margin_from_black,
+        })
+        .collect()
+}
+
+pub fn supervised_examples_from_traces(traces: &[RandomGameTrace]) -> Vec<SupervisedExample> {
+    let mut examples = Vec::new();
+    for trace in traces {
+        examples.extend(supervised_examples_from_trace(trace));
+    }
+    examples
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        PositionSamplingConfig, RandomPlayConfig, XorShift64Star, play_random_game,
-        play_random_game_from_board_with_rng, sample_reachable_positions,
+        PositionSamplingConfig, RandomPlayConfig, SupervisedExample, XorShift64Star,
+        play_random_game, play_random_game_from_board_with_rng, sample_reachable_positions,
+        supervised_examples_from_trace, supervised_examples_from_traces,
     };
     use crate::{
         Board, BoardStatus, Color, apply_forced_pass, apply_move, board_status, disc_count,
@@ -258,5 +291,41 @@ mod tests {
             let plies = u16::from(counts.black + counts.white) - 4;
             assert!(config.min_plies <= plies && plies <= config.max_plies);
         }
+    }
+
+    #[test]
+    fn supervised_examples_from_trace_keeps_prefix_moves_and_labels() {
+        let trace = play_random_game(17, &RandomPlayConfig { max_plies: Some(6) });
+        let examples = supervised_examples_from_trace(&trace);
+
+        assert_eq!(examples.len(), trace.boards.len());
+        for (ply, example) in examples.iter().enumerate() {
+            assert_eq!(
+                example,
+                &SupervisedExample {
+                    board: trace.boards[ply],
+                    ply: ply as u16,
+                    moves_until_here: trace.moves[..ply].to_vec(),
+                    final_result: trace.final_result,
+                    final_margin_from_black: trace.final_margin_from_black,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn supervised_examples_from_traces_concatenates_trace_examples() {
+        let first = play_random_game(1, &RandomPlayConfig { max_plies: Some(3) });
+        let second = play_random_game(2, &RandomPlayConfig { max_plies: Some(2) });
+        let examples = supervised_examples_from_traces(&[first.clone(), second.clone()]);
+
+        assert_eq!(
+            examples,
+            [
+                supervised_examples_from_trace(&first),
+                supervised_examples_from_trace(&second),
+            ]
+            .concat()
+        );
     }
 }

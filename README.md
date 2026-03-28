@@ -129,6 +129,14 @@ flat は shape が単一局面で `(F,)`、batch で `(B, F)` です。
 uv run maturin develop
 ```
 
+## Examples
+
+基本的な使い方は `examples/` に置いています。
+
+```bash
+uv run python examples/basic_usage.py
+```
+
 ## Release artifact
 
 バージョンタグ (`v*`) を push すると、GitHub Actions の release workflow が GitHub Release 向け artifact を生成します。

@@ -1,0 +1,61 @@
+from __future__ import annotations
+
+import veloversi as vv
+
+
+def main() -> None:
+    board = vv.initial_board()
+    print("initial:", board.to_bits())
+    print("legal moves:", vv.legal_moves_list(board))
+
+    next_board = vv.apply_move(board, 19)
+    print("after move 19:", next_board.to_bits())
+    print("status:", vv.board_status(next_board))
+    print("disc_count:", vv.disc_count(next_board))
+    print("margin_from_black:", vv.final_margin_from_black(next_board))
+
+    packed = vv.pack_board(next_board)
+    restored = vv.unpack_board(packed)
+    print("packed:", packed)
+    print("restored:", restored.to_bits())
+
+    trace = vv.play_random_game(7, {"max_plies": 8})
+    print("trace plies:", trace["plies_played"])
+    print("trace final_result:", trace["final_result"])
+    print("trace final_margin_from_black:", trace["final_margin_from_black"])
+
+    examples = vv.supervised_examples_from_trace(trace)
+    print("supervised examples:", len(examples))
+    first_example = examples[0]
+    print(
+        "first example:",
+        {
+            "board": first_example["board"].to_bits(),
+            "ply": first_example["ply"],
+            "moves_until_here": first_example["moves_until_here"],
+            "final_result": first_example["final_result"],
+            "final_margin_from_black": first_example["final_margin_from_black"],
+        },
+    )
+
+    history = trace["boards"][:3]
+    feature_config = {
+        "history_len": 2,
+        "include_legal_mask": True,
+        "include_phase_plane": True,
+        "include_turn_plane": True,
+        "perspective": "side_to_move",
+    }
+    planes = vv.encode_planes(trace["boards"][-1], history, feature_config)
+    flat = vv.encode_flat_features(trace["boards"][-1], history, feature_config)
+    print("planes shape:", planes.shape)
+    print("flat shape:", flat.shape)
+
+    sampled = vv.sample_reachable_positions(
+        11, {"num_positions": 3, "min_plies": 4, "max_plies": 8}
+    )
+    print("sampled positions:", [position.to_bits() for position in sampled])
+
+
+if __name__ == "__main__":
+    main()

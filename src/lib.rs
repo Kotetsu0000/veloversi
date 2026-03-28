@@ -19,8 +19,8 @@ pub use feature::{
     encode_planes, encode_planes_batch,
 };
 pub use random_play::{
-    PositionSamplingConfig, RandomGameTrace, RandomPlayConfig, play_random_game,
-    sample_reachable_positions,
+    PositionSamplingConfig, RandomGameTrace, RandomPlayConfig, SupervisedExample, play_random_game,
+    sample_reachable_positions, supervised_examples_from_trace, supervised_examples_from_traces,
 };
 pub use search::{
     ScoreKind, SearchConfig, SearchResult, SolveConfig, SolveError, SolveResult, can_solve_exact,

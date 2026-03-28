@@ -11,9 +11,10 @@ use crate::{
 };
 #[cfg(not(any(test, coverage)))]
 use crate::{
-    FeatureConfig, FeaturePerspective, PackedBoard, RandomPlayConfig, encode_flat_features,
-    encode_flat_features_batch, encode_planes, encode_planes_batch, pack_board, play_random_game,
-    sample_reachable_positions, unpack_board,
+    FeatureConfig, FeaturePerspective, Move, PackedBoard, RandomGameTrace, RandomPlayConfig,
+    SupervisedExample, encode_flat_features, encode_flat_features_batch, encode_planes,
+    encode_planes_batch, pack_board, play_random_game, sample_reachable_positions,
+    supervised_examples_from_trace, supervised_examples_from_traces, unpack_board,
 };
 
 #[pyclass(name = "Board")]
@@ -148,6 +149,75 @@ type PyRandomGameParts = (
     bool,
 );
 
+#[cfg(not(any(test, coverage)))]
+type PySupervisedExampleParts = (PyBoardBits, u16, Vec<Option<u8>>, &'static str, i8);
+
+#[cfg(not(any(test, coverage)))]
+type PyRandomGameTraceParts = (
+    Vec<(u64, u64, String)>,
+    Vec<Option<u8>>,
+    String,
+    i8,
+    u16,
+    bool,
+);
+
+#[cfg(not(any(test, coverage)))]
+fn supervised_example_to_py_parts(example: &SupervisedExample) -> PySupervisedExampleParts {
+    (
+        board_to_py_tuple(&example.board),
+        example.ply,
+        example
+            .moves_until_here
+            .iter()
+            .copied()
+            .map(move_to_py_option_square)
+            .collect(),
+        game_result_to_py_str(example.final_result),
+        example.final_margin_from_black,
+    )
+}
+
+#[cfg(not(any(test, coverage)))]
+fn random_game_trace_from_py_parts(
+    boards_bits: Vec<(u64, u64, String)>,
+    moves: Vec<Option<u8>>,
+    final_result: &str,
+    final_margin_from_black: i8,
+    plies_played: u16,
+    reached_terminal: bool,
+) -> PyResult<RandomGameTrace> {
+    let boards = boards_bits
+        .into_iter()
+        .map(|(black_bits, white_bits, side_to_move)| {
+            Board::from_bits(black_bits, white_bits, py_str_to_color(&side_to_move)?)
+                .map_err(|_| pyo3::exceptions::PyValueError::new_err("invalid board bits"))
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    let rust_moves = moves
+        .into_iter()
+        .map(|mv| mv.map(|square| Move { square }))
+        .collect();
+    let final_result = match final_result {
+        "black_win" => crate::GameResult::BlackWin,
+        "white_win" => crate::GameResult::WhiteWin,
+        "draw" => crate::GameResult::Draw,
+        _ => {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "final_result must be 'black_win', 'white_win', or 'draw'",
+            ));
+        }
+    };
+    Ok(RandomGameTrace {
+        boards,
+        moves: rust_moves,
+        final_result,
+        final_margin_from_black,
+        plies_played,
+        reached_terminal,
+    })
+}
+
 #[pymethods]
 impl PyBoard {
     #[new]
@@ -264,6 +334,63 @@ fn sample_reachable_positions_parts_py(
     .iter()
     .map(board_to_py_tuple)
     .collect()
+}
+
+#[pyfunction(name = "_supervised_examples_from_trace_parts")]
+#[cfg(not(any(test, coverage)))]
+fn supervised_examples_from_trace_parts_py(
+    boards_bits: Vec<(u64, u64, String)>,
+    moves: Vec<Option<u8>>,
+    final_result: &str,
+    final_margin_from_black: i8,
+    plies_played: u16,
+    reached_terminal: bool,
+) -> PyResult<Vec<PySupervisedExampleParts>> {
+    let trace = random_game_trace_from_py_parts(
+        boards_bits,
+        moves,
+        final_result,
+        final_margin_from_black,
+        plies_played,
+        reached_terminal,
+    )?;
+    Ok(supervised_examples_from_trace(&trace)
+        .iter()
+        .map(supervised_example_to_py_parts)
+        .collect())
+}
+
+#[pyfunction(name = "_supervised_examples_from_traces_parts")]
+#[cfg(not(any(test, coverage)))]
+fn supervised_examples_from_traces_parts_py(
+    traces: Vec<PyRandomGameTraceParts>,
+) -> PyResult<Vec<PySupervisedExampleParts>> {
+    let rust_traces = traces
+        .into_iter()
+        .map(
+            |(
+                boards_bits,
+                moves,
+                final_result,
+                final_margin_from_black,
+                plies_played,
+                reached_terminal,
+            )| {
+                random_game_trace_from_py_parts(
+                    boards_bits,
+                    moves,
+                    &final_result,
+                    final_margin_from_black,
+                    plies_played,
+                    reached_terminal,
+                )
+            },
+        )
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok(supervised_examples_from_traces(&rust_traces)
+        .iter()
+        .map(supervised_example_to_py_parts)
+        .collect())
 }
 
 #[pyfunction(name = "_encode_planes_parts")]
@@ -493,6 +620,16 @@ fn _core(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(not(any(test, coverage)))]
     module.add_function(wrap_pyfunction!(
         sample_reachable_positions_parts_py,
+        module
+    )?)?;
+    #[cfg(not(any(test, coverage)))]
+    module.add_function(wrap_pyfunction!(
+        supervised_examples_from_trace_parts_py,
+        module
+    )?)?;
+    #[cfg(not(any(test, coverage)))]
+    module.add_function(wrap_pyfunction!(
+        supervised_examples_from_traces_parts_py,
         module
     )?)?;
     #[cfg(not(any(test, coverage)))]

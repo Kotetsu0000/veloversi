@@ -26,6 +26,8 @@ from veloversi import (
     pack_board,
     play_random_game,
     sample_reachable_positions,
+    supervised_examples_from_trace,
+    supervised_examples_from_traces,
     transform_board,
     transform_square,
     unpack_board,
@@ -254,6 +256,65 @@ def test_random_play_public_api_rejects_invalid_config() -> None:
 
     with pytest.raises(ValueError, match="min_plies must be less than or equal to max_plies"):
         sample_reachable_positions(1, {"num_positions": 1, "min_plies": 3, "max_plies": 1})
+
+
+def test_supervised_examples_from_trace_returns_prefix_examples() -> None:
+    trace = play_random_game(11, {"max_plies": 6})
+    examples = supervised_examples_from_trace(trace)
+
+    assert len(examples) == len(trace["boards"])
+    for ply, example in enumerate(examples):
+        assert isinstance(example["board"], Board)
+        assert example["board"].to_bits() == trace["boards"][ply].to_bits()
+        assert example["ply"] == ply
+        assert example["moves_until_here"] == trace["moves"][:ply]
+        assert example["final_result"] == trace["final_result"]
+        assert example["final_margin_from_black"] == trace["final_margin_from_black"]
+
+
+def test_supervised_examples_from_traces_concatenates_examples() -> None:
+    first = play_random_game(1, {"max_plies": 3})
+    second = play_random_game(2, {"max_plies": 2})
+
+    merged = supervised_examples_from_traces([first, second])
+    separate = supervised_examples_from_trace(first) + supervised_examples_from_trace(second)
+
+    normalized_merged = [
+        {
+            **example,
+            "board": cast(Board, example["board"]).to_bits(),
+        }
+        for example in merged
+    ]
+    normalized_separate = [
+        {
+            **example,
+            "board": cast(Board, example["board"]).to_bits(),
+        }
+        for example in separate
+    ]
+
+    assert normalized_merged == normalized_separate
+
+
+def test_supervised_examples_public_api_rejects_invalid_trace() -> None:
+    with pytest.raises(ValueError, match="trace"):
+        supervised_examples_from_trace([])  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="boards"):
+        supervised_examples_from_trace(
+            {
+                "boards": [],
+                "moves": [],
+                "final_result": "draw",
+                "final_margin_from_black": 0,
+                "plies_played": 0,
+                "reached_terminal": True,
+            }
+        )
+
+    with pytest.raises(ValueError, match="traces"):
+        supervised_examples_from_traces({})  # type: ignore[arg-type]
 
 
 def test_encode_planes_and_flat_features_return_float32_arrays() -> None:

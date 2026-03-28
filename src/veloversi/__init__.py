@@ -9,6 +9,8 @@ from ._core import (
     _encode_planes_parts,
     _play_random_game_parts,
     _sample_reachable_positions_parts,
+    _supervised_examples_from_trace_parts,
+    _supervised_examples_from_traces_parts,
     _unpack_board_parts,
     Board,
     all_symmetries,
@@ -51,6 +53,8 @@ __all__ = [
     "pack_board",
     "play_random_game",
     "sample_reachable_positions",
+    "supervised_examples_from_trace",
+    "supervised_examples_from_traces",
     "unpack_board",
     "transform_board",
     "transform_square",
@@ -162,6 +166,93 @@ def sample_reachable_positions(seed: int, config: dict) -> list[Board]:
     return [
         Board(*bits)
         for bits in _sample_reachable_positions_parts(seed, num_positions, min_plies, max_plies)
+    ]
+
+
+def _validate_random_game_trace(trace: object) -> dict[object, object]:
+    if type(trace) is not dict:
+        raise ValueError("trace must be a dict")
+    return cast(dict[object, object], trace)
+
+
+def _trace_to_core_parts(
+    trace: object,
+) -> tuple[list[tuple[int, int, str]], list[int | None], str, int, int, bool]:
+    typed_trace = _validate_random_game_trace(trace)
+    boards = typed_trace.get("boards")
+    moves = typed_trace.get("moves")
+    final_result = typed_trace.get("final_result")
+    final_margin_from_black = typed_trace.get("final_margin_from_black")
+    plies_played = typed_trace.get("plies_played")
+    reached_terminal = typed_trace.get("reached_terminal")
+
+    if type(boards) is not list or not all(isinstance(board, Board) for board in boards):
+        raise ValueError("trace['boards'] must be a list[Board]")
+    if type(moves) is not list:
+        raise ValueError("trace['moves'] must be a list[int | None]")
+    if type(final_result) is not str:
+        raise ValueError("trace['final_result'] must be a str")
+    if final_result not in {"black_win", "white_win", "draw"}:
+        raise ValueError("trace['final_result'] must be 'black_win', 'white_win', or 'draw'")
+    if type(final_margin_from_black) is not int:
+        raise ValueError("trace['final_margin_from_black'] must be an int")
+    if type(plies_played) is not int or not (0 <= plies_played <= 0xFFFF):
+        raise ValueError("trace['plies_played'] must be an int in 0..65535")
+    if type(reached_terminal) is not bool:
+        raise ValueError("trace['reached_terminal'] must be a bool")
+
+    validated_moves: list[int | None] = []
+    for move in moves:
+        if move is None:
+            validated_moves.append(None)
+        elif type(move) is int and 0 <= move <= 63:
+            validated_moves.append(move)
+        else:
+            raise ValueError("trace['moves'] must contain int in 0..63 or None")
+
+    if len(cast(list[Board], boards)) != len(validated_moves) + 1:
+        raise ValueError("trace['boards'] must have len(trace['moves']) + 1")
+    if plies_played != len(validated_moves):
+        raise ValueError("trace['plies_played'] must equal len(trace['moves'])")
+
+    return (
+        [board.to_bits() for board in cast(list[Board], boards)],
+        validated_moves,
+        final_result,
+        final_margin_from_black,
+        plies_played,
+        reached_terminal,
+    )
+
+
+def _example_from_parts(
+    parts: tuple[tuple[int, int, str], int, list[int | None], str, int],
+) -> dict[str, object]:
+    board_bits, ply, moves_until_here, final_result, final_margin_from_black = parts
+    return {
+        "board": Board(*board_bits),
+        "ply": ply,
+        "moves_until_here": moves_until_here,
+        "final_result": final_result,
+        "final_margin_from_black": final_margin_from_black,
+    }
+
+
+def supervised_examples_from_trace(trace: dict) -> list[dict[str, object]]:
+    return [
+        _example_from_parts(parts)
+        for parts in _supervised_examples_from_trace_parts(*_trace_to_core_parts(trace))
+    ]
+
+
+def supervised_examples_from_traces(traces: list[dict]) -> list[dict[str, object]]:
+    if type(traces) is not list:
+        raise ValueError("traces must be a list[dict]")
+    return [
+        _example_from_parts(parts)
+        for parts in _supervised_examples_from_traces_parts(
+            [_trace_to_core_parts(trace) for trace in traces]
+        )
     ]
 
 
