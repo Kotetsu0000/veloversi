@@ -1167,6 +1167,38 @@ mod tests {
         rank * 8 + file
     }
 
+    fn eight_direction_long_flip_board() -> Board {
+        let black_bits = bit(square(3, 0))
+            | bit(square(0, 3))
+            | bit(square(6, 3))
+            | bit(square(3, 6))
+            | bit(square(0, 0))
+            | bit(square(6, 0))
+            | bit(square(0, 6))
+            | bit(square(6, 6));
+        let white_bits = bit(square(3, 1))
+            | bit(square(3, 2))
+            | bit(square(1, 3))
+            | bit(square(2, 3))
+            | bit(square(4, 3))
+            | bit(square(5, 3))
+            | bit(square(3, 4))
+            | bit(square(3, 5))
+            | bit(square(1, 1))
+            | bit(square(2, 2))
+            | bit(square(4, 2))
+            | bit(square(5, 1))
+            | bit(square(1, 5))
+            | bit(square(2, 4))
+            | bit(square(4, 4))
+            | bit(square(5, 5));
+        Board {
+            black_bits,
+            white_bits,
+            side_to_move: Color::Black,
+        }
+    }
+
     // テスト側の基準値として使う素朴な合法手生成を実装する。
     fn generate_legal_moves_naive(board: &Board) -> LegalMoves {
         let (player_bits, opponent_bits) = match board.side_to_move {
@@ -1973,6 +2005,7 @@ mod tests {
                 white_bits: bit(square(1, 0)) | bit(square(0, 1)) | bit(square(6, 6)),
                 side_to_move: Color::Black,
             },
+            eight_direction_long_flip_board(),
         ];
 
         for board in positions {
@@ -2024,6 +2057,24 @@ mod tests {
                 generate_legal_moves_naive(&board).bitmask
             );
         }
+    }
+
+    #[test]
+    fn generic_movegen_and_flip_handle_long_rays_in_all_eight_directions() {
+        let board = eight_direction_long_flip_board();
+        let mv = Move {
+            square: square(3, 3),
+        };
+        let (player_bits, opponent_bits) = (board.black_bits, board.white_bits);
+
+        assert_eq!(
+            legal_moves_bitmask_generic(player_bits, opponent_bits),
+            generate_legal_moves_naive(&board).bitmask
+        );
+        assert_eq!(
+            super::flips_for_move_bits_unchecked_generic(player_bits, opponent_bits, mv.square),
+            flips_for_move(&board, mv)
+        );
     }
 
     #[test]

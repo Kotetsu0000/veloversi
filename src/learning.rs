@@ -267,6 +267,31 @@ mod tests {
     }
 
     #[test]
+    fn legal_move_masks_are_written_per_board_without_overlap() {
+        let trace = play_random_game(23, &RandomPlayConfig { max_plies: Some(2) });
+        let examples = packed_supervised_examples_from_trace(&trace);
+        let batch =
+            prepare_planes_learning_batch(&examples[..2], &feature_config()).expect("valid");
+
+        let first = &batch.legal_move_masks[..64];
+        let second = &batch.legal_move_masks[64..128];
+        let first_active: Vec<usize> = first
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, &value)| if value == 1.0 { Some(idx) } else { None })
+            .collect();
+        let second_active: Vec<usize> = second
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, &value)| if value == 1.0 { Some(idx) } else { None })
+            .collect();
+
+        assert_eq!(first_active, vec![19, 26, 37, 44]);
+        assert_ne!(second_active, first_active);
+        assert!(!second_active.is_empty());
+    }
+
+    #[test]
     fn replay_moves_to_history_reconstructs_newest_first_history() {
         let trace = play_random_game(21, &RandomPlayConfig { max_plies: Some(4) });
         let current = trace.boards[4];

@@ -258,6 +258,24 @@ mod tests {
     }
 
     #[test]
+    fn random_generator_matches_fixed_sequence_for_known_seed() {
+        let mut rng = XorShift64Star::new(1);
+        assert_eq!(rng.next_u64(), 5_180_492_295_206_395_165);
+        assert_eq!(rng.next_u64(), 12_380_297_144_915_551_517);
+        assert_eq!(rng.next_u64(), 13_389_498_078_930_870_103);
+        assert_eq!(rng.next_u64(), 5_599_127_315_341_312_413);
+    }
+
+    #[test]
+    fn choose_index_uses_next_random_value() {
+        let mut rng = XorShift64Star::new(1);
+        assert_eq!(rng.choose_index(7), 5);
+        assert_eq!(rng.choose_index(7), 1);
+        assert_eq!(rng.choose_index(7), 4);
+        assert_eq!(rng.choose_index(7), 3);
+    }
+
+    #[test]
     fn play_random_game_is_reproducible_for_same_seed() {
         let config = RandomPlayConfig {
             max_plies: Some(12),
@@ -343,6 +361,71 @@ mod tests {
             let plies = u16::from(counts.black + counts.white) - 4;
             assert!(config.min_plies <= plies && plies <= config.max_plies);
         }
+    }
+
+    #[test]
+    fn sample_reachable_positions_returns_empty_for_invalid_range() {
+        assert!(
+            sample_reachable_positions(
+                1,
+                &PositionSamplingConfig {
+                    num_positions: 4,
+                    min_plies: 8,
+                    max_plies: 7,
+                },
+            )
+            .is_empty()
+        );
+        assert!(
+            sample_reachable_positions(
+                1,
+                &PositionSamplingConfig {
+                    num_positions: 0,
+                    min_plies: 0,
+                    max_plies: 4,
+                },
+            )
+            .is_empty()
+        );
+        assert!(
+            sample_reachable_positions(
+                1,
+                &PositionSamplingConfig {
+                    num_positions: 4,
+                    min_plies: 61,
+                    max_plies: 61,
+                },
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn sample_reachable_positions_accepts_equal_bounds_at_sixty() {
+        let positions = sample_reachable_positions(
+            7,
+            &PositionSamplingConfig {
+                num_positions: 8,
+                min_plies: 60,
+                max_plies: 60,
+            },
+        );
+
+        assert_eq!(positions.len(), 8);
+    }
+
+    #[test]
+    fn sample_reachable_positions_can_fill_large_requests_at_ply_sixty() {
+        let positions = sample_reachable_positions(
+            7,
+            &PositionSamplingConfig {
+                num_positions: 256,
+                min_plies: 60,
+                max_plies: 60,
+            },
+        );
+
+        assert_eq!(positions.len(), 256);
     }
 
     #[test]

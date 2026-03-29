@@ -313,10 +313,13 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        RecordingError, append_game_record, current_board, finish_game_recording,
-        load_game_records, random_start_board, record_move, record_pass, start_game_recording,
+        RecordingError, XorShift64Star, append_game_record, current_board, finish_game_recording,
+        game_result_to_record_str, json_to_packed_board, load_game_records, random_start_board,
+        record_move, record_pass, record_str_to_game_result, start_game_recording,
     };
-    use crate::engine::{Board, BoardStatus, Color, Move, apply_forced_pass, board_status};
+    use crate::engine::{
+        Board, BoardStatus, Color, GameResult, Move, apply_forced_pass, board_status,
+    };
 
     fn unique_temp_path() -> std::path::PathBuf {
         let nanos = SystemTime::now()
@@ -329,6 +332,14 @@ mod tests {
     #[test]
     fn random_start_board_is_reproducible_for_same_seed() {
         assert_eq!(random_start_board(5, 7), random_start_board(5, 7));
+    }
+
+    #[test]
+    fn random_start_board_rng_matches_fixed_sequence() {
+        let mut rng = XorShift64Star::new(1);
+        assert_eq!(rng.next_u64(), 5_180_492_295_206_395_165);
+        assert_eq!(rng.next_u64(), 12_380_297_144_915_551_517);
+        assert_eq!(rng.choose_index(7), 4);
     }
 
     #[test]
@@ -399,5 +410,62 @@ mod tests {
         assert_eq!(loaded, vec![record.clone(), record]);
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn record_result_strings_round_trip_all_variants() {
+        assert_eq!(game_result_to_record_str(GameResult::BlackWin), "black");
+        assert_eq!(game_result_to_record_str(GameResult::WhiteWin), "white");
+        assert_eq!(game_result_to_record_str(GameResult::Draw), "draw");
+        assert!(matches!(
+            record_str_to_game_result("black"),
+            Ok(GameResult::BlackWin)
+        ));
+        assert!(matches!(
+            record_str_to_game_result("white"),
+            Ok(GameResult::WhiteWin)
+        ));
+        assert!(matches!(
+            record_str_to_game_result("draw"),
+            Ok(GameResult::Draw)
+        ));
+    }
+
+    #[test]
+    fn json_to_packed_board_rejects_invalid_side_to_move() {
+        let err = json_to_packed_board(super::JsonPackedBoard {
+            black_bits: 0,
+            white_bits: 0,
+            side_to_move: "bad".to_string(),
+        });
+        assert!(matches!(err, Err(RecordingError::InvalidFormat(_))));
+    }
+
+    #[test]
+    fn json_to_packed_board_accepts_white_side_to_move() {
+        let packed = json_to_packed_board(super::JsonPackedBoard {
+            black_bits: 0x0000_0000_1000_0000,
+            white_bits: 0x0000_0008_0000_0000,
+            side_to_move: "white".to_string(),
+        })
+        .expect("valid white board");
+
+        assert_eq!(packed.side_to_move, Color::White);
+    }
+
+    #[test]
+    fn recording_error_display_includes_message() {
+        assert_eq!(
+            RecordingError::InvalidMove.to_string(),
+            "invalid move for current recording state"
+        );
+        assert_eq!(
+            RecordingError::InvalidPass.to_string(),
+            "invalid pass for current recording state"
+        );
+        assert_eq!(
+            RecordingError::NotTerminal.to_string(),
+            "recording is not terminal"
+        );
     }
 }

@@ -867,9 +867,12 @@ impl SearchState {
 #[cfg(test)]
 mod tests {
     use super::{
-        BoardKey, BoundKind, SCORE_INF, ScoreKind, SearchConfig, SearchResult, SearchState,
-        SolveConfig, SolveError, TranspositionEntry, TranspositionTable, can_solve_exact,
-        deadline_from_config, determine_bound, mid_evaluate_diff, search_best_move, solve_exact,
+        BoardKey, BoundKind, CORNER_MASK, EDGE_MASK, SCORE_INF, SCORE_MAX, ScoreKind, SearchConfig,
+        SearchLine, SearchResult, SearchState, SolveConfig, SolveError, TranspositionEntry,
+        TranspositionTable, can_solve_exact, corner_closeness_penalty, deadline_from_config,
+        determine_bound, frontier_count, is_immediate_win_priority, leaf_score, mid_evaluate_diff,
+        neighbor_mask, opponent_board, ordered_moves, oriented_bits, potential_mobility,
+        search_best_move, solve_exact, update_root_candidates,
     };
     use crate::engine::{
         Board, BoardStatus, Color, Move, apply_forced_pass, apply_move_unchecked, board_status,
@@ -877,6 +880,107 @@ mod tests {
     };
     use crate::random_play::{RandomPlayConfig, play_random_game};
     use std::time::{Duration, Instant};
+
+    fn bit(square: u8) -> u64 {
+        1u64 << square
+    }
+
+    fn manual_neighbor_mask(bits: u64) -> u64 {
+        let mut result = 0u64;
+        for square in 0..64 {
+            if bits & bit(square) == 0 {
+                continue;
+            }
+            let file = (square % 8) as i8;
+            let rank = (square / 8) as i8;
+            for (df, dr) in [
+                (-1, -1),
+                (0, -1),
+                (1, -1),
+                (-1, 0),
+                (1, 0),
+                (-1, 1),
+                (0, 1),
+                (1, 1),
+            ] {
+                let next_file = file + df;
+                let next_rank = rank + dr;
+                if (0..8).contains(&next_file) && (0..8).contains(&next_rank) {
+                    result |= bit((next_rank * 8 + next_file) as u8);
+                }
+            }
+        }
+        result
+    }
+
+    fn manual_corner_closeness_penalty(player_bits: u64, opponent_bits: u64) -> i32 {
+        let corners = [
+            (0u8, [1u8, 8u8], 9u8),
+            (7u8, [6u8, 15u8], 14u8),
+            (56u8, [48u8, 57u8], 49u8),
+            (63u8, [55u8, 62u8], 54u8),
+        ];
+        let mut diff = 0i32;
+        for (corner, c_squares, x_square) in corners {
+            if (player_bits | opponent_bits) & bit(corner) != 0 {
+                continue;
+            }
+            for square in c_squares {
+                if opponent_bits & bit(square) != 0 {
+                    diff += 1;
+                }
+                if player_bits & bit(square) != 0 {
+                    diff -= 1;
+                }
+            }
+            if opponent_bits & bit(x_square) != 0 {
+                diff += 2;
+            }
+            if player_bits & bit(x_square) != 0 {
+                diff -= 2;
+            }
+        }
+        diff
+    }
+
+    fn manual_mid_evaluate_diff(board: &Board) -> i16 {
+        let (player_bits, opponent_bits) = oriented_bits(board);
+        let empty_bits = !(player_bits | opponent_bits);
+        let empty_count = empty_bits.count_ones() as u8;
+        let disc_diff = player_bits.count_ones() as i32 - opponent_bits.count_ones() as i32;
+        let mobility_diff = generate_legal_moves(board).count as i32
+            - generate_legal_moves(&opponent_board(board)).count as i32;
+        let potential_mobility_diff = potential_mobility(opponent_bits, empty_bits)
+            - potential_mobility(player_bits, empty_bits);
+        let frontier_diff =
+            frontier_count(opponent_bits, empty_bits) - frontier_count(player_bits, empty_bits);
+        let corner_diff = (player_bits & CORNER_MASK).count_ones() as i32
+            - (opponent_bits & CORNER_MASK).count_ones() as i32;
+        let edge_diff = (player_bits & EDGE_MASK).count_ones() as i32
+            - (opponent_bits & EDGE_MASK).count_ones() as i32;
+        let corner_closeness_diff = manual_corner_closeness_penalty(player_bits, opponent_bits);
+        let parity_term = if empty_count.is_multiple_of(2) { -1 } else { 1 };
+
+        let (disc_weight, mobility_weight, potential_weight, frontier_weight) = if empty_count >= 41
+        {
+            (0, 10, 6, 6)
+        } else if empty_count >= 21 {
+            (2, 7, 4, 5)
+        } else {
+            (6, 4, 2, 3)
+        };
+
+        let raw = 24 * corner_diff
+            + 3 * edge_diff
+            + mobility_weight * mobility_diff
+            + potential_weight * potential_mobility_diff
+            + frontier_weight * frontier_diff
+            + disc_weight * disc_diff
+            + 8 * corner_closeness_diff
+            + 2 * parity_term;
+
+        (raw / 8).clamp(-(SCORE_MAX as i32), SCORE_MAX as i32) as i16
+    }
 
     fn brute_force_exact(board: &Board) -> (Option<Move>, i16) {
         let legal = generate_legal_moves(board);
@@ -1386,6 +1490,7 @@ mod tests {
             table.lookup(key, 1).expect("entry must exist").best_move,
             Some(Move { square: 37 })
         );
+        assert_eq!(table.best_move_for(&board), Some(Move { square: 37 }));
     }
 
     #[test]
@@ -1407,6 +1512,27 @@ mod tests {
         assert!(!state.node_limit_reached());
         assert!(!state.time_limit_reached());
         assert!(!state.should_stop());
+    }
+
+    #[test]
+    fn search_state_should_stop_when_single_limit_is_hit() {
+        let node_only = SearchState {
+            searched_nodes: 4,
+            max_nodes: Some(4),
+            exact_solver_empty_threshold: None,
+            transposition_table: None,
+            deadline: None,
+        };
+        let time_only = SearchState {
+            searched_nodes: 0,
+            max_nodes: None,
+            exact_solver_empty_threshold: None,
+            transposition_table: None,
+            deadline: Some(Instant::now() - Duration::from_millis(1)),
+        };
+
+        assert!(node_only.should_stop());
+        assert!(time_only.should_stop());
     }
 
     #[test]
@@ -1441,5 +1567,246 @@ mod tests {
             })
             .is_some()
         );
+
+        let now = Instant::now();
+        let deadline = deadline_from_config(&SearchConfig {
+            max_depth: Some(1),
+            max_nodes: None,
+            time_limit_ms: Some(50),
+            exact_solver_empty_threshold: None,
+            use_transposition_table: false,
+            multi_pv: 1,
+        })
+        .expect("deadline must exist");
+        assert!(deadline > now);
+    }
+
+    #[test]
+    fn oriented_bits_follow_side_to_move() {
+        let black_to_move = Board::from_bits(bit(0), bit(1), Color::Black).expect("valid");
+        let white_to_move = Board::from_bits(bit(0), bit(1), Color::White).expect("valid");
+
+        assert_eq!(oriented_bits(&black_to_move), (bit(0), bit(1)));
+        assert_eq!(oriented_bits(&white_to_move), (bit(1), bit(0)));
+    }
+
+    #[test]
+    fn neighbor_mask_matches_expected_for_corner_and_center() {
+        assert_eq!(neighbor_mask(bit(0)), bit(1) | bit(8) | bit(9));
+        assert_eq!(
+            neighbor_mask(bit(27)),
+            bit(18) | bit(19) | bit(20) | bit(26) | bit(28) | bit(34) | bit(35) | bit(36)
+        );
+        assert_eq!(
+            neighbor_mask(bit(0) | bit(2)),
+            bit(1) | bit(3) | bit(8) | bit(9) | bit(10) | bit(11)
+        );
+    }
+
+    #[test]
+    fn neighbor_mask_matches_manual_oracle_for_overlapping_patterns() {
+        let mut patterns = vec![
+            bit(0) | bit(1) | bit(8),
+            bit(9) | bit(10) | bit(17) | bit(18),
+            bit(27) | bit(28) | bit(35),
+            bit(54) | bit(55) | bit(62),
+            bit(7) | bit(14) | bit(15) | bit(22),
+        ];
+        let mut seed = 0x9c3f_27a1_5b4d_e681_u64;
+        for _ in 0..64 {
+            seed ^= seed << 7;
+            seed ^= seed >> 9;
+            seed ^= seed << 8;
+            patterns.push(seed);
+        }
+
+        for bits in patterns {
+            assert_eq!(neighbor_mask(bits), manual_neighbor_mask(bits));
+        }
+    }
+
+    #[test]
+    fn potential_mobility_and_frontier_count_match_hand_computed_values() {
+        let bits = bit(27);
+        let empty_bits =
+            bit(0) | bit(18) | bit(19) | bit(20) | bit(26) | bit(28) | bit(34) | bit(35) | bit(36);
+
+        assert_eq!(potential_mobility(bits, empty_bits), 8);
+        assert_eq!(frontier_count(bits, empty_bits), 1);
+    }
+
+    #[test]
+    fn corner_closeness_penalty_counts_c_and_x_squares_for_empty_corner() {
+        let player_bits = bit(1) | bit(8) | bit(9);
+        let opponent_bits = bit(6) | bit(14);
+
+        assert_eq!(corner_closeness_penalty(player_bits, 0), -4);
+        assert_eq!(corner_closeness_penalty(0, opponent_bits), 3);
+        assert_eq!(corner_closeness_penalty(player_bits, opponent_bits), -1);
+    }
+
+    #[test]
+    fn corner_closeness_penalty_matches_manual_oracle_for_all_corners() {
+        let cases = [
+            (bit(1) | bit(8) | bit(9), bit(6) | bit(14)),
+            (bit(48) | bit(49) | bit(57), bit(55) | bit(54) | bit(62)),
+            (
+                bit(1) | bit(15) | bit(48) | bit(54),
+                bit(8) | bit(14) | bit(57) | bit(62),
+            ),
+            (bit(56) | bit(48) | bit(49) | bit(57), 0),
+            (0, bit(63) | bit(54) | bit(55) | bit(62)),
+        ];
+
+        for (player_bits, opponent_bits) in cases {
+            assert_eq!(
+                corner_closeness_penalty(player_bits, opponent_bits),
+                manual_corner_closeness_penalty(player_bits, opponent_bits)
+            );
+        }
+    }
+
+    #[test]
+    fn mid_evaluate_diff_matches_fixed_values_across_phase_bands() {
+        let opening = Board::from_bits(240786604032, 134217728, Color::White).expect("valid");
+        let midgame =
+            Board::from_bits(2369140658154504705, 4534491720744960, Color::White).expect("valid");
+        let endgame =
+            Board::from_bits(36737469621651075, 8678570009477326860, Color::White).expect("valid");
+
+        assert_eq!(mid_evaluate_diff(&opening), 8);
+        assert_eq!(mid_evaluate_diff(&Board::new_initial()), 0);
+        assert_eq!(mid_evaluate_diff(&midgame), 2);
+        assert_eq!(mid_evaluate_diff(&endgame), -1);
+    }
+
+    #[test]
+    fn mid_evaluate_diff_matches_manual_formula_for_rich_phase_positions() {
+        let boards = [
+            Board::from_bits(70647382802432, 61813581417984, Color::Black).expect("valid"),
+            Board::from_bits(2384191241584640, 4620693287222644224, Color::Black).expect("valid"),
+            Board::from_bits(16204198439771746336, 871477710842515100, Color::Black)
+                .expect("valid"),
+        ];
+
+        for board in boards {
+            assert_eq!(mid_evaluate_diff(&board), manual_mid_evaluate_diff(&board));
+        }
+    }
+
+    #[test]
+    fn ordered_moves_prefers_tt_move_then_natural_order() {
+        let board = Board::new_initial();
+        let ordered = ordered_moves(
+            &board,
+            generate_legal_moves(&board),
+            Some(Move { square: 37 }),
+        );
+        let squares: Vec<u8> = ordered
+            .iter()
+            .map(|candidate| candidate.mv.square)
+            .collect();
+
+        assert_eq!(squares, vec![37, 19, 26, 44]);
+        assert!(is_immediate_win_priority(&ordered[0], true));
+        assert!(!is_immediate_win_priority(&ordered[1], false));
+    }
+
+    #[test]
+    fn leaf_score_negates_for_forced_pass_positions() {
+        let board = Board::from_bits(0xFFFF_FFFF_FFFF_FF7E, 0x0000_0000_0000_0080, Color::Black)
+            .expect("board must be valid");
+        let passed = apply_forced_pass(&board).expect("forced pass must succeed");
+
+        assert_eq!(board_status(&board), BoardStatus::ForcedPass);
+        assert_eq!(leaf_score(&board), -leaf_score(&passed));
+    }
+
+    #[test]
+    fn update_root_candidates_orders_by_score_and_truncates() {
+        let mut candidates = Vec::new();
+        update_root_candidates(
+            &mut candidates,
+            super::RootCandidate {
+                line: SearchLine {
+                    best_move: Some(Move { square: 19 }),
+                    best_score: 3,
+                    pv: vec![Move { square: 19 }],
+                    is_exact: false,
+                    completed: true,
+                },
+            },
+            2,
+        );
+        update_root_candidates(
+            &mut candidates,
+            super::RootCandidate {
+                line: SearchLine {
+                    best_move: Some(Move { square: 26 }),
+                    best_score: 7,
+                    pv: vec![Move { square: 26 }, Move { square: 18 }],
+                    is_exact: false,
+                    completed: true,
+                },
+            },
+            2,
+        );
+        update_root_candidates(
+            &mut candidates,
+            super::RootCandidate {
+                line: SearchLine {
+                    best_move: Some(Move { square: 37 }),
+                    best_score: 5,
+                    pv: vec![Move { square: 37 }],
+                    is_exact: false,
+                    completed: true,
+                },
+            },
+            2,
+        );
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].line.best_move, Some(Move { square: 26 }));
+        assert_eq!(candidates[1].line.best_move, Some(Move { square: 37 }));
+    }
+
+    #[test]
+    fn search_best_move_matches_bruteforce_at_depth_three_on_curated_random_boards() {
+        let mut boards = Vec::new();
+        for seed in [7u64, 13, 29] {
+            let trace = play_random_game(
+                seed,
+                &RandomPlayConfig {
+                    max_plies: Some(20),
+                },
+            );
+            for &idx in &[4usize, 8, 12] {
+                boards.push((seed, idx, trace.boards[idx]));
+            }
+        }
+
+        for (seed, idx, board) in boards {
+            let expected = brute_force_midgame(&board, 3);
+            let result = search_best_move(
+                &board,
+                &SearchConfig {
+                    max_depth: Some(3),
+                    max_nodes: None,
+                    time_limit_ms: None,
+                    exact_solver_empty_threshold: None,
+                    use_transposition_table: false,
+                    multi_pv: 1,
+                },
+            );
+
+            assert_eq!(
+                result.best_move, expected.0,
+                "seed {seed}, board index {idx}"
+            );
+            assert_eq!(
+                result.best_score, expected.1,
+                "seed {seed}, board index {idx}"
+            );
+        }
     }
 }

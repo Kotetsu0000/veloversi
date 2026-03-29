@@ -493,4 +493,65 @@ mod tests {
         assert_eq!(encoded.data_f32[192], 0.0);
         assert_eq!(encoded.data_f32[193], 1.0);
     }
+
+    #[test]
+    fn encode_planes_places_each_optional_channel_at_expected_offset() {
+        let current = apply_move(&Board::new_initial(), crate::Move { square: 19 })
+            .expect("move must succeed");
+        let history = [Board::new_initial()];
+        let config = FeatureConfig {
+            history_len: 1,
+            include_legal_mask: true,
+            include_phase_plane: true,
+            include_turn_plane: true,
+            perspective: FeaturePerspective::SideToMove,
+        };
+
+        let encoded = encode_planes(&current, &history, &config);
+        assert_eq!(encoded.channels, 7);
+
+        let self_now = &encoded.data_f32[0..64];
+        let opp_now = &encoded.data_f32[64..128];
+        let self_prev = &encoded.data_f32[128..192];
+        let opp_prev = &encoded.data_f32[192..256];
+        let legal = &encoded.data_f32[256..320];
+        let phase = &encoded.data_f32[320..384];
+        let turn = &encoded.data_f32[384..448];
+
+        let active = |slice: &[f32]| -> Vec<usize> {
+            slice
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, &value)| if value == 1.0 { Some(idx) } else { None })
+                .collect()
+        };
+
+        assert_eq!(active(self_now), vec![36]);
+        assert_eq!(active(opp_now), vec![19, 27, 28, 35]);
+        assert_eq!(active(self_prev), vec![27, 36]);
+        assert_eq!(active(opp_prev), vec![28, 35]);
+        assert_eq!(active(legal), vec![18, 20, 34]);
+        assert!(phase.iter().all(|&value| value == 1.0 / 60.0));
+        assert!(turn.iter().all(|&value| value == 0.0));
+    }
+
+    #[test]
+    fn encode_planes_writes_turn_plane_at_expected_offset_for_black_to_move() {
+        let current = Board::new_initial();
+        let history =
+            [apply_move(&current, crate::Move { square: 19 }).expect("move must succeed")];
+        let config = FeatureConfig {
+            history_len: 1,
+            include_legal_mask: true,
+            include_phase_plane: true,
+            include_turn_plane: true,
+            perspective: FeaturePerspective::SideToMove,
+        };
+
+        let encoded = encode_planes(&current, &history, &config);
+        let turn = &encoded.data_f32[384..448];
+
+        assert_eq!(encoded.channels, 7);
+        assert!(turn.iter().all(|&value| value == 1.0));
+    }
 }

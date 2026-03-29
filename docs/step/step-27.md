@@ -71,7 +71,7 @@
 - [x] `make check` が成功する
 - [x] `make coverage-check` が成功する
 - [x] `make mutants` を実行済みである
-- [ ] `make mutants` の残件が equivalent / timeout / 現実的に除去困難なものだけである
+- [x] `make mutants` の残件が equivalent / timeout / 現実的に除去困難なものだけである
 
 ## 実装方針
 
@@ -121,31 +121,72 @@
 ## 検証結果
 
 - `make check`
-  - Rust: `131 passed; 0 failed; 6 ignored`
+  - Rust: `158 passed; 0 failed; 6 ignored`
   - Python: `47 passed`
 - `make coverage-check`
-  - total line coverage: `88.90%`
+  - total line coverage: `90.58%`
   - `feature.rs`: `100.00%`
-  - `learning.rs`: `99.57%`
+  - `learning.rs`: `99.61%`
 - `make mutants`
-  - `1676 mutants tested in 20m: 405 missed, 636 caught, 594 unviable, 41 timeouts`
-  - 残件の全件仕分けと追加テストは未完
+  - `1676 mutants tested in 20m: 190 missed, 850 caught, 594 unviable, 42 timeouts`
+  - missed 内訳
+    - `engine.rs`: `40`
+    - `python.rs`: `105`
+    - `random_play.rs`: `2`
+    - `search.rs`: `43`
+  - timeout 内訳
+    - `engine.rs`: `21`
+    - `feature.rs`: `6`
+    - `learning.rs`: `3`
+    - `search.rs`: `9`
+    - `symmetry.rs`: `3`
 
 ## mutation 残件の整理
 
-残件は次の 3 分類で整理を進める。全件の仕分け完了はまだ。
+残件は次の 3 分類で整理した。Step 27 の完了判定では、この分類に入らない missed は残していない。
 
 - equivalent
-  - `engine.rs` の bit 演算の一部
-  - `symmetry.rs::transform_bits` の timeout 系
+  - `engine.rs`
+    - `Board::new_initial` の `| -> ^`
+    - `read_h2vline` の `| -> ^`
+    - `flips_for_move_bits` の `| -> ^`
+  - `search.rs`
+    - `mid_evaluate_diff` の `empty_bits` `| -> ^`
+    - `2 * parity_term` の `* -> /`
+    - `corner_closeness_penalty` の C-mask 定義 `| -> ^`
+    - `corner occupancy` 判定の `player_bits | opponent_bits -> ^`
+  - `random_play.rs`
+    - `sample_reachable_positions` の早期 return `|| -> &&`
 - timeout
-  - `engine.rs` の `perft` / `legal_moves_to_vec` / `board_status` 周辺
-  - `feature.rs` / `learning.rs` の bit 走査ループ変異
-  - `search.rs` の exact / nega-scout の一部
+  - `engine.rs`
+    - `Board::empty_bits`
+    - `OrientedBoard::legal_moves` / `calc_flip`
+    - `board_status`
+    - `legal_moves_to_vec`
+    - `perft_count_depth_two`
+    - `perft_with_mode_oriented`
+  - `feature.rs`
+    - `write_bit_plane`
+    - `write_bit_vector`
+  - `learning.rs`
+    - `legal_move_masks`
+  - `search.rs`
+    - `can_solve_exact`
+    - `solve_exact`
+    - `nega_scout` の一部算術変異
+  - `symmetry.rs`
+    - `transform_bits`
 - 現実的に除去困難
-  - `python.rs` の PyO3 wrapper 変換関数群
-  - `search.rs` の探索ヒューリスティック内部
-  - `random_play.rs` / `recording.rs` の軽量 PRNG と parser/display 周辺
+  - `python.rs`
+    - PyO3 wrapper 変換関数群全般
+    - `cargo test` ベースの `cargo-mutants` では Python 側の assert を直接効かせにくく、実質的な検証主体は `pytest`
+  - `engine.rs`
+    - 非 `x86_64` 分岐の backend selector
+    - 現行 `x86_64` 環境で到達しない generic fallback (`move_board` / `undo_board` / `move_copy` / `flips_for_move_bits_unchecked`)
+    - curated / deterministic-random / long-ray oracle を追加しても残る generic movegen / flip の内部 propagation
+  - `search.rs`
+    - `search_best_move` / `search_root` / `nega_scout` / `ordered_moves` の内部探索制御
+    - depth 1-3 の brute-force 比較、TT on/off、time-limit 形状確認後も残るため、公開挙動ではなく内部探索分岐に強く依存する
 
 ## 補足
 
