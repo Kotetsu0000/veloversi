@@ -1,4 +1,4 @@
-from typing import cast
+from typing import cast, overload
 
 import numpy as np
 
@@ -23,27 +23,30 @@ from ._core import (
     _supervised_examples_from_trace_parts,
     _supervised_examples_from_traces_parts,
     _unpack_board_parts,
-    Board,
+    Board as _CoreBoard,
     all_symmetries,
-    apply_move,
-    apply_forced_pass,
+    apply_move as _apply_move_core,
+    apply_forced_pass as _apply_forced_pass_core,
     board_from_bits,
-    board_status,
-    disc_count,
-    final_margin_from_black,
-    game_result,
-    generate_legal_moves,
+    board_status as _board_status_core,
+    disc_count as _disc_count_core,
+    final_margin_from_black as _final_margin_from_black_core,
+    game_result as _game_result_core,
+    generate_legal_moves as _generate_legal_moves_core,
     initial_board,
-    is_legal_move,
-    legal_moves_list,
-    pack_board,
+    is_legal_move as _is_legal_move_core,
+    legal_moves_list as _legal_moves_list_core,
+    pack_board as _pack_board_core,
     transform_board,
     transform_square,
-    validate_board,
+    validate_board as _validate_board_core,
 )
+
+Board = _CoreBoard
 
 __all__ = [
     "Board",
+    "RecordedBoard",
     "initial_board",
     "board_from_bits",
     "all_symmetries",
@@ -145,6 +148,102 @@ def _validate_feature_config(config: object) -> tuple[int, bool, bool, bool, str
     )
 
 
+class RecordedBoard:
+    __slots__ = ("_start_board", "_current_board", "_moves")
+
+    def __init__(self, start_board: Board, current_board: Board, moves: list[int | None]) -> None:
+        self._start_board = start_board
+        self._current_board = current_board
+        self._moves = list(moves)
+
+    @property
+    def start_board(self) -> Board:
+        return self._start_board
+
+    @property
+    def current_board(self) -> Board:
+        return self._current_board
+
+    @property
+    def black_bits(self) -> int:
+        return self.current_board.black_bits
+
+    @property
+    def white_bits(self) -> int:
+        return self.current_board.white_bits
+
+    @property
+    def side_to_move(self) -> str:
+        return self.current_board.side_to_move
+
+    @property
+    def moves(self) -> list[int | None]:
+        return list(self._moves)
+
+    def to_bits(self) -> tuple[int, int, str]:
+        return self.current_board.to_bits()
+
+    def apply_move(self, square: int) -> "RecordedBoard":
+        return _recording_from_parts(
+            _record_move_parts(
+                self.start_board.to_bits(),
+                self.current_board.to_bits(),
+                self.moves,
+                _validate_u16(square, "square"),
+            )
+        )
+
+    def apply_forced_pass(self) -> "RecordedBoard":
+        return _recording_from_parts(
+            _record_pass_parts(
+                self.start_board.to_bits(),
+                self.current_board.to_bits(),
+                self.moves,
+            )
+        )
+
+    def generate_legal_moves(self) -> int:
+        return generate_legal_moves(self)
+
+    def legal_moves_list(self) -> list[int]:
+        return legal_moves_list(self)
+
+    def is_legal_move(self, square: int) -> bool:
+        return is_legal_move(self, square)
+
+    def board_status(self) -> str:
+        return board_status(self)
+
+    def disc_count(self) -> tuple[int, int, int]:
+        return disc_count(self)
+
+    def game_result(self) -> str:
+        return game_result(self)
+
+    def final_margin_from_black(self) -> int:
+        return final_margin_from_black(self)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "start_board": self.start_board,
+            "current_board": self.current_board,
+            "moves": self.moves,
+        }
+
+    def finish(self) -> dict[str, object]:
+        return finish_game_recording(self)
+
+    def save_record(self, path: str) -> None:
+        append_game_record(path, self)
+
+
+def _recording_from_parts(
+    parts: tuple[tuple[int, int, str], tuple[int, int, str], list[int | None]],
+) -> RecordedBoard:
+    start_board_bits, current_board_bits, moves = parts
+    return RecordedBoard(Board(*start_board_bits), Board(*current_board_bits), moves)
+
+
 def unpack_board(packed: tuple[int, int, str]) -> Board:
     if type(packed) is not tuple or len(packed) != 3:
         raise ValueError("packed must be a tuple[int, int, str]")
@@ -158,6 +257,140 @@ def unpack_board(packed: tuple[int, int, str]) -> Board:
         raise ValueError("packed[2] must be str")
 
     return _unpack_board_parts(black_bits, white_bits, side_to_move)
+
+
+def _board_from_board_or_record(value: object) -> Board:
+    if isinstance(value, Board):
+        return value
+    if isinstance(value, RecordedBoard):
+        return value.current_board
+    if type(value) is dict:
+        typed_record = _validate_recording(value)
+        current = typed_record.get("current_board")
+        if isinstance(current, Board):
+            return current
+    raise TypeError("value must be a Board or RecordedBoard")
+
+
+def generate_legal_moves(board_or_record: object) -> int:
+    return _generate_legal_moves_core(_board_from_board_or_record(board_or_record))
+
+
+def validate_board(board_or_record: object) -> None:
+    _validate_board_core(_board_from_board_or_record(board_or_record))
+
+
+def legal_moves_list(board_or_record: object) -> list[int]:
+    return _legal_moves_list_core(_board_from_board_or_record(board_or_record))
+
+
+def is_legal_move(board_or_record: object, square: int) -> bool:
+    return _is_legal_move_core(
+        _board_from_board_or_record(board_or_record),
+        _validate_u16(square, "square"),
+    )
+
+
+@overload
+def apply_move(board_or_record: Board, square: int) -> Board: ...
+
+
+@overload
+def apply_move(board_or_record: RecordedBoard, square: int) -> RecordedBoard: ...
+
+
+def apply_move(board_or_record: object, square: int) -> Board | RecordedBoard:
+    if isinstance(board_or_record, RecordedBoard):
+        return board_or_record.apply_move(square)
+    return _apply_move_core(
+        _board_from_board_or_record(board_or_record),
+        _validate_u16(square, "square"),
+    )
+
+
+@overload
+def apply_forced_pass(board_or_record: Board) -> Board: ...
+
+
+@overload
+def apply_forced_pass(board_or_record: RecordedBoard) -> RecordedBoard: ...
+
+
+def apply_forced_pass(board_or_record: object) -> Board | RecordedBoard:
+    if isinstance(board_or_record, RecordedBoard):
+        return board_or_record.apply_forced_pass()
+    return _apply_forced_pass_core(_board_from_board_or_record(board_or_record))
+
+
+def board_status(board_or_record: object) -> str:
+    return _board_status_core(_board_from_board_or_record(board_or_record))
+
+
+def disc_count(board_or_record: object) -> tuple[int, int, int]:
+    return _disc_count_core(_board_from_board_or_record(board_or_record))
+
+
+def game_result(board_or_record: object) -> str:
+    return _game_result_core(_board_from_board_or_record(board_or_record))
+
+
+def final_margin_from_black(board_or_record: object) -> int:
+    return _final_margin_from_black_core(_board_from_board_or_record(board_or_record))
+
+
+def pack_board(board_or_record: object) -> tuple[int, int, str]:
+    return _pack_board_core(_board_from_board_or_record(board_or_record))
+
+
+def _board_apply_move(self: Board, square: int) -> Board:
+    result = apply_move(self, square)
+    assert isinstance(result, Board)
+    return result
+
+
+def _board_apply_forced_pass(self: Board) -> Board:
+    result = apply_forced_pass(self)
+    assert isinstance(result, Board)
+    return result
+
+
+def _board_generate_legal_moves(self: Board) -> int:
+    return generate_legal_moves(self)
+
+
+def _board_legal_moves_list(self: Board) -> list[int]:
+    return legal_moves_list(self)
+
+
+def _board_is_legal_move(self: Board, square: int) -> bool:
+    return is_legal_move(self, square)
+
+
+def _board_board_status(self: Board) -> str:
+    return board_status(self)
+
+
+def _board_disc_count(self: Board) -> tuple[int, int, int]:
+    return disc_count(self)
+
+
+def _board_game_result(self: Board) -> str:
+    return game_result(self)
+
+
+def _board_final_margin_from_black(self: Board) -> int:
+    return final_margin_from_black(self)
+
+
+Board.apply_move = _board_apply_move  # type: ignore[attr-defined]
+Board.apply_forced_pass = _board_apply_forced_pass  # type: ignore[attr-defined]
+Board.generate_legal_moves = _board_generate_legal_moves  # type: ignore[attr-defined]
+Board.legal_moves_list = _board_legal_moves_list  # type: ignore[attr-defined]
+Board.is_legal_move = _board_is_legal_move  # type: ignore[attr-defined]
+Board.board_status = _board_board_status  # type: ignore[attr-defined]
+Board.disc_count = _board_disc_count  # type: ignore[attr-defined]
+Board.game_result = _board_game_result  # type: ignore[attr-defined]
+Board.final_margin_from_black = _board_final_margin_from_black  # type: ignore[attr-defined]
 
 
 def play_random_game(seed: int, config: dict) -> dict:
@@ -200,31 +433,39 @@ def sample_reachable_positions(seed: int, config: dict) -> list[Board]:
     ]
 
 
-def start_game_recording(start_board: Board) -> dict[str, object]:
+def start_game_recording(start_board: Board) -> RecordedBoard:
     return _recording_from_parts(_start_game_recording_parts(start_board))
 
 
-def record_move(record: dict, square: int) -> dict[str, object]:
-    return _recording_from_parts(
-        _record_move_parts(*_recording_to_core_parts(record), _validate_u16(square, "square"))
-    )
+def record_move(record: RecordedBoard, square: int) -> RecordedBoard:
+    if not isinstance(record, RecordedBoard):
+        raise ValueError("record must be a RecordedBoard")
+    return record.apply_move(square)
 
 
-def record_pass(record: dict) -> dict[str, object]:
-    return _recording_from_parts(_record_pass_parts(*_recording_to_core_parts(record)))
+def record_pass(record: RecordedBoard) -> RecordedBoard:
+    if not isinstance(record, RecordedBoard):
+        raise ValueError("record must be a RecordedBoard")
+    return record.apply_forced_pass()
 
 
-def current_board(record: dict) -> Board:
-    return cast(Board, _validate_recording(record)["current_board"])
+def current_board(record: RecordedBoard) -> Board:
+    if not isinstance(record, RecordedBoard):
+        raise ValueError("record must be a RecordedBoard")
+    return record.current_board
 
 
-def finish_game_recording(record: dict) -> dict[str, object]:
+def finish_game_recording(record: RecordedBoard) -> dict[str, object]:
+    if not isinstance(record, RecordedBoard):
+        raise ValueError("record must be a RecordedBoard")
     return _game_record_from_parts(_finish_game_recording_parts(*_recording_to_core_parts(record)))
 
 
-def append_game_record(path: str, record: dict) -> None:
+def append_game_record(path: str, record: object) -> None:
     if type(path) is not str:
         raise ValueError("path must be a str")
+    if isinstance(record, RecordedBoard):
+        record = finish_game_recording(record)
     _append_game_record_parts(path, *_game_record_to_core_parts(record))
 
 
@@ -234,20 +475,9 @@ def load_game_records(path: str) -> list[dict[str, object]]:
     return [_game_record_from_parts(parts) for parts in _load_game_records_parts(path)]
 
 
-def _board_from_board_or_record(value: object) -> Board:
-    if isinstance(value, Board):
-        return value
-    if type(value) is dict:
-        typed_record = _validate_recording(value)
-        current = typed_record.get("current_board")
-        if isinstance(current, Board):
-            return current
-    raise TypeError("value must be a Board or recording dict")
-
-
 def _boards_from_board_or_record_batch(values: object) -> list[Board]:
     if type(values) is not list:
-        raise ValueError("values must be a list[Board | dict]")
+        raise ValueError("values must be a list[Board | RecordedBoard]")
     return [_board_from_board_or_record(value) for value in cast(list[object], values)]
 
 
@@ -378,41 +608,21 @@ def _trace_to_core_parts(
 
 
 def _recording_to_core_parts(
-    record: object,
+    record: RecordedBoard,
 ) -> tuple[tuple[int, int, str], tuple[int, int, str], list[int | None]]:
-    typed_record = _validate_recording(record)
-    start_board = typed_record.get("start_board")
-    current = typed_record.get("current_board")
-    moves = typed_record.get("moves")
-
-    if not isinstance(start_board, Board):
-        raise ValueError("record['start_board'] must be a Board")
-    if not isinstance(current, Board):
-        raise ValueError("record['current_board'] must be a Board")
-    if type(moves) is not list:
-        raise ValueError("record['moves'] must be a list[int | None]")
+    if not isinstance(record, RecordedBoard):
+        raise ValueError("record must be a RecordedBoard")
 
     validated_moves: list[int | None] = []
-    for move in moves:
+    for move in record.moves:
         if move is None:
             validated_moves.append(None)
         elif type(move) is int and 0 <= move <= 63:
             validated_moves.append(move)
         else:
-            raise ValueError("record['moves'] must contain int in 0..63 or None")
+            raise ValueError("record.moves must contain int in 0..63 or None")
 
-    return start_board.to_bits(), current.to_bits(), validated_moves
-
-
-def _recording_from_parts(
-    parts: tuple[tuple[int, int, str], tuple[int, int, str], list[int | None]],
-) -> dict[str, object]:
-    start_board_bits, current_board_bits, moves = parts
-    return {
-        "start_board": Board(*start_board_bits),
-        "current_board": Board(*current_board_bits),
-        "moves": moves,
-    }
+    return record.start_board.to_bits(), record.current_board.to_bits(), validated_moves
 
 
 def _game_record_from_parts(

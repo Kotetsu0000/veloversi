@@ -9,6 +9,7 @@
 - 初期局面の生成
 - 合法手取得
 - 着手
+- `Board` method-style API
 - `pack_board` / `unpack_board`
 - `play_random_game`
 - `supervised_examples_from_trace`
@@ -23,7 +24,7 @@ uv run python examples/basic_usage.py
 
 ## `generate_training_data.py`
 
-`legal_moves_list(board)` の中からランダムに手を選び、policy/value 学習向けの JSONL データを出力します。
+`board.legal_moves_list()` の中からランダムに手を選び、policy/value 学習向けの JSONL データを出力します。
 
 - board は packed 形式
 - value ラベル
@@ -72,10 +73,10 @@ uv run python examples/pytorch_dataloader.py
 
 - `random_start_board`
 - `start_game_recording`
-- `record_move`
-- `record_pass`
+- `RecordedBoard.apply_move`
+- `RecordedBoard.apply_forced_pass`
 - `finish_game_recording`
-- `append_game_record`
+- `RecordedBoard.save_record`
 - `load_game_records`
 
 実行:

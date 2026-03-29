@@ -66,11 +66,11 @@ uv add "https://github.com/Kotetsu0000/veloversi/releases/download/v0.1.0/velove
 import veloversi as vv
 
 board = vv.initial_board()
-moves = vv.legal_moves_list(board)
-next_board = vv.apply_move(board, moves[0])
+moves = board.legal_moves_list()
+next_board = board.apply_move(moves[0])
 
 print(moves)
-print(vv.board_status(next_board))
+print(next_board.board_status())
 ```
 
 ## 盤面 API
@@ -184,14 +184,35 @@ recording API:
 
 - `random_start_board`
 - `start_game_recording`
-- `record_move`
-- `record_pass`
-- `current_board`
+- `RecordedBoard.apply_move`
+- `RecordedBoard.apply_forced_pass`
+- `RecordedBoard.save_record`
 - `finish_game_recording`
 - `append_game_record`
 - `load_game_records`
 
-recording は immutable で、Python では `dict` として扱います。
+recording は immutable で、Python では `RecordedBoard` として扱います。
+`RecordedBoard` は現在局面を内部に持ち、`Board` と近い操作感で使えます。
+
+最小例:
+
+```python
+import veloversi as vv
+
+record = vv.start_game_recording(vv.random_start_board(plies=6, seed=123))
+
+while True:
+    board = record.current_board
+    status = board.board_status()
+    if status == "terminal":
+        break
+    if status == "forced_pass":
+        record = record.apply_forced_pass()
+        continue
+    record = record.apply_move(board.legal_moves_list()[0])
+
+record.save_record("games.jsonl")
+```
 
 game record は JSONL の 1 行 1 試合です。  
 各 record は、少なくとも次を持ちます。

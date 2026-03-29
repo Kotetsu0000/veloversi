@@ -6,13 +6,13 @@ import veloversi as vv
 def main() -> None:
     board = vv.initial_board()
     print("initial:", board.to_bits())
-    print("legal moves:", vv.legal_moves_list(board))
+    print("legal moves:", board.legal_moves_list())
 
-    next_board = vv.apply_move(board, 19)
+    next_board = board.apply_move(19)
     print("after move 19:", next_board.to_bits())
-    print("status:", vv.board_status(next_board))
-    print("disc_count:", vv.disc_count(next_board))
-    print("margin_from_black:", vv.final_margin_from_black(next_board))
+    print("status:", next_board.board_status())
+    print("disc_count:", next_board.disc_count())
+    print("margin_from_black:", next_board.final_margin_from_black())
 
     packed = vv.pack_board(next_board)
     restored = vv.unpack_board(packed)

@@ -78,12 +78,12 @@
 
 ## 受け入れ条件
 
-- [ ] `Board` が method-style API を持つ
-- [ ] recording 公開型が method-style API を持つ
-- [ ] `Board` と recording の主要操作名が揃っている
-- [ ] 既存 examples が method-style API 前提に更新されている
-- [ ] `README.md` が新しい API に追従している
-- [ ] `make check` が成功する
+- [x] `Board` が method-style API を持つ
+- [x] recording 公開型が method-style API を持つ
+- [x] `Board` と recording の主要操作名が揃っている
+- [x] 既存 examples が method-style API 前提に更新されている
+- [x] `README.md` が新しい API に追従している
+- [x] `make check` が成功する
 
 ## 実装方針
 
@@ -109,3 +109,40 @@
 現状の `veloversi.apply_move(board, move)` / `veloversi.record_move(record, move)` は、機能としては足りているが利用体験が分裂している。
 学習支援ライブラリとして使う際も、盤面と記録付き盤面の操作感が揃っていた方が扱いやすい。
 `0.2.0` では、この利用体験の整理を最優先にする。
+
+## 実装結果
+
+- Python 公開型 `RecordedBoard` を追加
+- `Board` に method-style API を追加
+  - `apply_move`
+  - `apply_forced_pass`
+  - `generate_legal_moves`
+  - `legal_moves_list`
+  - `is_legal_move`
+  - `board_status`
+  - `disc_count`
+  - `game_result`
+  - `final_margin_from_black`
+- `RecordedBoard` に board と同名の主要 method を追加
+  - `apply_move`
+  - `apply_forced_pass`
+  - `generate_legal_moves`
+  - `legal_moves_list`
+  - `is_legal_move`
+  - `board_status`
+  - `disc_count`
+  - `game_result`
+  - `final_margin_from_black`
+- `RecordedBoard.save_record(path)` を追加
+- examples / README を method-style API 前提へ更新
+- module-level API は互換のため残したまま、新 API を優先導線にした
+
+## 検証結果
+
+- `make check`
+  - Rust: `158 passed; 0 failed; 6 ignored`
+  - Python: `49 passed`
+- `uv run python examples/basic_usage.py`
+  - 成功
+- `uv run python examples/game_recording.py`
+  - 成功

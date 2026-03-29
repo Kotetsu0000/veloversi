@@ -8,6 +8,7 @@ import veloversi._core as core
 
 from veloversi import (
     Board,
+    RecordedBoard,
     all_symmetries,
     apply_forced_pass,
     apply_move,
@@ -119,6 +120,20 @@ def test_apply_move_and_forced_pass_behave_as_expected() -> None:
         0x0000_0000_0000_0080,
         "white",
     )
+
+
+def test_board_method_style_api_matches_module_level_helpers() -> None:
+    board = initial_board()
+
+    moved = board.apply_move(19)
+
+    assert moved.to_bits() == apply_move(board, 19).to_bits()
+    assert board.legal_moves_list() == legal_moves_list(board)
+    assert board.is_legal_move(19) is True
+    assert board.board_status() == board_status(board)
+    assert board.disc_count() == disc_count(board)
+    assert board.game_result() == game_result(board)
+    assert board.final_margin_from_black() == final_margin_from_black(board)
 
 
 def test_step10_python_public_surface_matches_policy() -> None:
@@ -478,9 +493,11 @@ def test_start_game_recording_and_record_move_update_current_board() -> None:
     record = start_game_recording(initial_board())
     next_record = record_move(record, 19)
 
+    assert isinstance(record, RecordedBoard)
+    assert isinstance(next_record, RecordedBoard)
     assert current_board(record).to_bits() == initial_board().to_bits()
     assert current_board(next_record).to_bits() == apply_move(initial_board(), 19).to_bits()
-    assert next_record["moves"] == [19]
+    assert next_record.moves == [19]
 
 
 def test_record_pass_updates_recording() -> None:
@@ -488,8 +505,23 @@ def test_record_pass_updates_recording() -> None:
     record = start_game_recording(board)
     next_record = record_pass(record)
 
-    assert next_record["moves"] == [None]
+    assert next_record.moves == [None]
     assert current_board(next_record).to_bits() == apply_forced_pass(board).to_bits()
+
+
+def test_recorded_board_method_style_api_matches_module_level_helpers() -> None:
+    record = start_game_recording(initial_board())
+    moved = record.apply_move(19)
+
+    assert isinstance(moved, RecordedBoard)
+    assert moved.current_board.to_bits() == apply_move(initial_board(), 19).to_bits()
+    assert moved.moves == [19]
+    assert moved.legal_moves_list() == legal_moves_list(moved)
+    assert moved.is_legal_move(moved.legal_moves_list()[0]) is True
+    assert moved.board_status() == board_status(moved)
+    assert moved.disc_count() == disc_count(moved)
+    assert moved.game_result() == game_result(moved)
+    assert moved.final_margin_from_black() == final_margin_from_black(moved)
 
 
 def test_finish_game_recording_requires_terminal_board() -> None:
@@ -554,7 +586,7 @@ def test_prepare_cnn_model_input_returns_batch_first_three_planes() -> None:
     assert legal_squares == {19, 26, 37, 44}
 
 
-def test_prepare_model_input_accepts_recording_dict() -> None:
+def test_prepare_model_input_accepts_recorded_board() -> None:
     record = start_game_recording(initial_board())
     record = record_move(record, 19)
 

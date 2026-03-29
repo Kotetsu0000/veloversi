@@ -16,26 +16,26 @@ def play_random_game_manual(seed: int) -> dict[str, Any]:
     moves: list[int | None] = []
 
     while True:
-        status = vv.board_status(board)
+        status = board.board_status()
         if status == "terminal":
             break
         if status == "forced_pass":
-            board = vv.apply_forced_pass(board)
+            board = board.apply_forced_pass()
             moves.append(None)
             boards.append(board)
             continue
 
-        legal_moves = vv.legal_moves_list(board)
+        legal_moves = board.legal_moves_list()
         move = rng.choice(legal_moves)
-        board = vv.apply_move(board, move)
+        board = board.apply_move(move)
         moves.append(move)
         boards.append(board)
 
     return {
         "boards": boards,
         "moves": moves,
-        "final_result": vv.game_result(board),
-        "final_margin_from_black": vv.final_margin_from_black(board),
+        "final_result": board.game_result(),
+        "final_margin_from_black": board.final_margin_from_black(),
         "plies_played": len(moves),
         "reached_terminal": True,
     }
