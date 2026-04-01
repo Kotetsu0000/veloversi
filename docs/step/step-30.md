@@ -79,13 +79,13 @@
 
 ## 受け入れ条件
 
-- [ ] game record JSONL を開いて総局面数を取得できる
-- [ ] `global_index` で 1 局面を取得できる
-- [ ] `global_index` で CNN / flat 入力を取得できる
-- [ ] `global_index` で value / policy 教師データを取得できる
-- [ ] `random_start_board(...)` 開始の record でも正しく replay できる
-- [ ] README / examples に最小利用例がある
-- [ ] `make check` が成功する
+- [x] game record JSONL を開いて総局面数を取得できる
+- [x] `global_index` で 1 局面を取得できる
+- [x] `global_index` で CNN / flat 入力を取得できる
+- [x] `global_index` で value / policy 教師データを取得できる
+- [x] `random_start_board(...)` 開始の record でも正しく replay できる
+- [x] README / examples に最小利用例がある
+- [x] `make check` が成功する
 
 ## 実装方針
 
@@ -127,3 +127,25 @@
 Step 25 で game record 保存が入り、Step 26 で学習入力 helper が揃った。
 しかし、現在は JSONL を試合単位でしか扱えず、PyTorch の map-style `Dataset` にそのまま乗せるには毎回利用側で index と replay を実装する必要がある。
 局面 index API を追加すれば、保存済みデータを直接 `__len__` / `__getitem__` 相当で扱えるようになり、学習コードの実装コストを大きく下げられる。
+
+## 実装結果
+
+- Python 公開 API に `RecordDataset` と `open_game_record_dataset(path)` を追加した
+- `RecordDataset` は次を提供する
+  - `len(dataset)` / `dataset.len()`
+  - `dataset.get(global_index)`
+  - `dataset.get_cnn_input(global_index)`
+  - `dataset.get_flat_input(global_index)`
+  - `dataset.get_targets(global_index)`
+- `global_index` は policy 有効局面だけを index 対象とする
+  - pass と policy 無効 sample は除外する
+- replay は常に `start_board` を起点に行う
+  - `random_start_board(...)` 開始 record でも復元できる
+- README と `examples/pytorch_dataloader.py` を `RecordDataset` 前提に更新した
+
+## 検証結果
+
+- `uv run pytest -q src/test_python_api.py`: 成功
+  - `54 passed`
+- `uv run python -m py_compile examples/pytorch_dataloader.py`: 成功
+- `make check`: 成功

@@ -26,6 +26,7 @@ from veloversi import (
     is_legal_move,
     legal_moves_list,
     load_game_records,
+    open_game_record_dataset,
     pack_board,
     packed_supervised_examples_from_trace,
     packed_supervised_examples_from_traces,
@@ -596,6 +597,139 @@ def test_append_game_record_rejects_invalid_format_file(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="invalid JSONL"):
         append_game_record(str(path), record)
+
+
+def test_open_game_record_dataset_indexes_only_policy_enabled_positions(tmp_path: Path) -> None:
+    path = tmp_path / "dataset.jsonl"
+    first = start_game_recording(initial_board())
+    while True:
+        status = first.board_status()
+        if status == "terminal":
+            break
+        if status == "forced_pass":
+            first = first.apply_forced_pass()
+            continue
+        first = first.apply_move(first.legal_moves_list()[0])
+    terminal = board_from_bits(0xFFFF_FFFF_FFFF_FFFF, 0, "black")
+    append_game_record(str(path), first.finish())
+    append_game_record(str(path), start_game_recording(terminal).finish())
+
+    dataset = open_game_record_dataset(str(path))
+
+    expected = sum(
+        1 for move in cast(list[int | None], first.finish()["moves"]) if move is not None
+    )
+    assert len(dataset) == expected
+    assert dataset.len() == expected
+
+
+def test_record_dataset_get_returns_expected_position_and_targets(tmp_path: Path) -> None:
+    path = tmp_path / "dataset-targets.jsonl"
+    record = start_game_recording(initial_board())
+    record = record.apply_move(19)
+    record = record.apply_move(record.legal_moves_list()[0])
+    while True:
+        status = record.board_status()
+        if status == "terminal":
+            break
+        if status == "forced_pass":
+            record = record.apply_forced_pass()
+            continue
+        record = record.apply_move(record.legal_moves_list()[0])
+    append_game_record(str(path), record.finish())
+
+    dataset = open_game_record_dataset(str(path))
+    item = dataset.get(0)
+    cnn = dataset.get_cnn_input(0)
+    flat = dataset.get_flat_input(0)
+    targets = dataset.get_targets(0)
+
+    assert item["record_index"] == 0
+    assert item["ply"] == 0
+    assert item["global_index"] == 0
+    assert item["policy_target_index"] == 19
+    assert cast(Board, item["board"]).to_bits() == initial_board().to_bits()
+    assert cnn.shape == (3, 8, 8)
+    assert flat.shape == (192,)
+    policy_target = cast(np.ndarray, targets["policy_target"])
+    assert policy_target.shape == (64,)
+    assert policy_target.dtype == np.float32
+    assert policy_target[19] == np.float32(1.0)
+    expected_margin = cast(int, item["final_margin_from_black"])
+    expected_value = expected_margin / 64.0
+    if cast(Board, item["board"]).side_to_move == "white":
+        expected_value = -expected_value
+    assert targets["value_target"] == np.float32(expected_value)
+
+
+def test_record_dataset_random_start_board_replay_matches_saved_games(tmp_path: Path) -> None:
+    path = tmp_path / "random-start-dataset.jsonl"
+    saved_records: list[dict[str, object]] = []
+    for seed in range(32):
+        record = start_game_recording(random_start_board((seed % 8) + 1, seed + 100))
+        while True:
+            status = record.board_status()
+            if status == "terminal":
+                break
+            if status == "forced_pass":
+                record = record.apply_forced_pass()
+                continue
+            record = record.apply_move(record.legal_moves_list()[0])
+        finished = record.finish()
+        saved_records.append(finished)
+        append_game_record(str(path), finished)
+
+    dataset = open_game_record_dataset(str(path))
+    running_index = 0
+    for record_index, saved in enumerate(saved_records):
+        start_board = unpack_board(cast(tuple[int, int, str], saved["start_board"]))
+        board = start_board
+        for ply, move in enumerate(cast(list[int | None], saved["moves"])):
+            if move is None:
+                board = board.apply_forced_pass()
+                continue
+            item = dataset.get(running_index)
+            assert item["record_index"] == record_index
+            assert item["ply"] == ply
+            assert cast(Board, item["board"]).to_bits() == board.to_bits()
+            running_index += 1
+            board = board.apply_move(move)
+
+    assert running_index == len(dataset)
+
+
+def test_open_game_record_dataset_accepts_single_path_and_multiple_paths(tmp_path: Path) -> None:
+    path_a = tmp_path / "a.jsonl"
+    path_b = tmp_path / "b.jsonl"
+
+    record_a = start_game_recording(initial_board())
+    while True:
+        status = record_a.board_status()
+        if status == "terminal":
+            break
+        if status == "forced_pass":
+            record_a = record_a.apply_forced_pass()
+            continue
+        record_a = record_a.apply_move(record_a.legal_moves_list()[0])
+
+    record_b = start_game_recording(random_start_board(3, 123))
+    while True:
+        status = record_b.board_status()
+        if status == "terminal":
+            break
+        if status == "forced_pass":
+            record_b = record_b.apply_forced_pass()
+            continue
+        record_b = record_b.apply_move(record_b.legal_moves_list()[0])
+
+    append_game_record(str(path_a), record_a.finish())
+    append_game_record(str(path_b), record_b.finish())
+
+    dataset_a = open_game_record_dataset(path_a)
+    dataset_both = open_game_record_dataset([path_a, path_b])
+
+    assert len(dataset_a) > 0
+    assert len(dataset_both) > len(dataset_a)
 
 
 def test_encode_planes_and_flat_features_return_float32_arrays() -> None:

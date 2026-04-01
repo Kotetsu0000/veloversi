@@ -1,3 +1,5 @@
+from bisect import bisect_right
+from pathlib import Path
 from typing import cast, overload
 
 import numpy as np
@@ -75,6 +77,8 @@ __all__ = [
     "finish_game_recording",
     "append_game_record",
     "load_game_records",
+    "RecordDataset",
+    "open_game_record_dataset",
     "supervised_examples_from_trace",
     "supervised_examples_from_traces",
     "packed_supervised_examples_from_trace",
@@ -260,6 +264,106 @@ class RecordedBoard:
         append_game_record(path, self)
 
 
+class RecordDataset:
+    """Indexable view over append-only game record JSONL.
+
+    `len(dataset)` counts only policy-enabled positions.
+    Pass and policy-invalid plies are excluded from the index.
+    """
+
+    __slots__ = ("_records", "_cumulative_positions")
+
+    def __init__(self, records: list[dict[str, object]]) -> None:
+        validated_records = [_validate_game_record(record) for record in records]
+        cumulative: list[int] = []
+        total = 0
+        for record in validated_records:
+            total += sum(1 for move in cast(list[object], record["moves"]) if move is not None)
+            cumulative.append(total)
+        self._records = validated_records
+        self._cumulative_positions = cumulative
+
+    def __len__(self) -> int:
+        return self._cumulative_positions[-1] if self._cumulative_positions else 0
+
+    def len(self) -> int:
+        return len(self)
+
+    def __getitem__(self, global_index: int) -> dict[str, object]:
+        return self.get(global_index)
+
+    def _resolve_index(self, global_index: int) -> tuple[int, int]:
+        if type(global_index) is not int:
+            raise TypeError("global_index must be an int")
+        if global_index < 0 or global_index >= len(self):
+            raise IndexError("global_index out of range")
+        record_index = bisect_right(self._cumulative_positions, global_index)
+        previous_total = 0 if record_index == 0 else self._cumulative_positions[record_index - 1]
+        within_record_index = global_index - previous_total
+        moves = cast(list[object], self._records[record_index]["moves"])
+        seen = -1
+        for ply, move in enumerate(moves):
+            if move is not None:
+                seen += 1
+                if seen == within_record_index:
+                    return record_index, ply
+        raise IndexError("resolved index does not map to a policy-enabled ply")
+
+    def _board_at(self, record_index: int, ply: int) -> Board:
+        record = self._records[record_index]
+        board = unpack_board(cast(tuple[int, int, str], record["start_board"]))
+        moves = cast(list[object], record["moves"])
+        for move in moves[:ply]:
+            if move is None:
+                board = board.apply_forced_pass()
+            else:
+                board = board.apply_move(cast(int, move))
+        return board
+
+    def get(self, global_index: int) -> dict[str, object]:
+        """Return one indexed position.
+
+        The returned `board` is always the current `Board` at that ply.
+        """
+        record_index, ply = self._resolve_index(global_index)
+        record = self._records[record_index]
+        board = self._board_at(record_index, ply)
+        return {
+            "board": board,
+            "record_index": record_index,
+            "ply": ply,
+            "global_index": global_index,
+            "policy_target_index": cast(int, cast(list[object], record["moves"])[ply]),
+            "final_result": cast(str, record["final_result"]),
+            "final_margin_from_black": cast(int, record["final_margin_from_black"]),
+        }
+
+    def get_cnn_input(self, global_index: int) -> np.ndarray:
+        """Return one `(3, 8, 8)` CNN input sample."""
+        board = cast(Board, self.get(global_index)["board"])
+        return board.prepare_cnn_model_input()[0]
+
+    def get_flat_input(self, global_index: int) -> np.ndarray:
+        """Return one `(192,)` flat input sample."""
+        board = cast(Board, self.get(global_index)["board"])
+        return board.prepare_flat_model_input()[0]
+
+    def get_targets(self, global_index: int) -> dict[str, object]:
+        """Return `value_target` and `(64,)` float32 one-hot `policy_target`."""
+        item = self.get(global_index)
+        board = cast(Board, item["board"])
+        final_margin_from_black = cast(int, item["final_margin_from_black"])
+        side_to_move_margin = (
+            final_margin_from_black if board.side_to_move == "black" else -final_margin_from_black
+        )
+        policy_target = np.zeros((64,), dtype=np.float32)
+        policy_target[cast(int, item["policy_target_index"])] = 1.0
+        return {
+            "value_target": np.float32(side_to_move_margin / 64.0),
+            "policy_target": policy_target,
+        }
+
+
 def _recording_from_parts(
     parts: tuple[tuple[int, int, str], tuple[int, int, str], list[int | None]],
 ) -> RecordedBoard:
@@ -280,6 +384,41 @@ def unpack_board(packed: tuple[int, int, str]) -> Board:
         raise ValueError("packed[2] must be str")
 
     return _unpack_board_parts(black_bits, white_bits, side_to_move)
+
+
+def _validate_game_record(record: object) -> dict[str, object]:
+    (
+        start_board,
+        moves,
+        final_result,
+        final_black_discs,
+        final_white_discs,
+        final_empty_discs,
+        final_margin_from_black,
+    ) = _game_record_to_core_parts(record)
+    return {
+        "start_board": start_board,
+        "moves": moves,
+        "final_result": final_result,
+        "final_black_discs": final_black_discs,
+        "final_white_discs": final_white_discs,
+        "final_empty_discs": final_empty_discs,
+        "final_margin_from_black": final_margin_from_black,
+    }
+
+
+def _normalize_record_dataset_paths(paths: object) -> list[str]:
+    if isinstance(paths, (str, Path)):
+        return [str(paths)]
+    if type(paths) is list:
+        normalized: list[str] = []
+        for path in cast(list[object], paths):
+            if isinstance(path, (str, Path)):
+                normalized.append(str(path))
+            else:
+                raise TypeError("paths must be a path or a list of paths")
+        return normalized
+    raise TypeError("paths must be a path or a list of paths")
 
 
 def _board_from_board_or_record(value: object) -> Board:
@@ -529,6 +668,14 @@ def load_game_records(path: str) -> list[dict[str, object]]:
     if type(path) is not str:
         raise ValueError("path must be a str")
     return [_game_record_from_parts(parts) for parts in _load_game_records_parts(path)]
+
+
+def open_game_record_dataset(paths: object) -> RecordDataset:
+    """Open one or more append-only game record JSONL files as one position dataset."""
+    records: list[dict[str, object]] = []
+    for path in _normalize_record_dataset_paths(paths):
+        records.extend(load_game_records(path))
+    return RecordDataset(records)
 
 
 def _boards_from_board_or_record_batch(values: object) -> list[Board]:

@@ -205,6 +205,7 @@ recording API:
 - `finish_game_recording`
 - `append_game_record`
 - `load_game_records`
+- `open_game_record_dataset`
 
 recording は immutable で、Python では `RecordedBoard` として扱います。
 `RecordedBoard` は現在局面を内部に持ち、`Board` と近い操作感で使えます。
@@ -257,6 +258,41 @@ game record は JSONL の 1 行 1 試合です。
 - `black`
 - `white`
 - `draw`
+
+## RecordDataset
+
+保存済み game record JSONL を、局面 index で引ける dataset API として扱えます。
+
+- `dataset = vv.open_game_record_dataset(path)`
+- `dataset = vv.open_game_record_dataset([path1, path2, ...])`
+- `len(dataset)`
+- `dataset.get(global_index)`
+- `dataset.get_cnn_input(global_index)`
+- `dataset.get_flat_input(global_index)`
+- `dataset.get_targets(global_index)`
+
+注意:
+
+- `len(dataset)` は全手数ではなく、policy target を持つ局面数です
+- pass や policy 無効局面は index 対象から除外されます
+- JSONL は append-only 前提です
+
+`dataset.get(global_index)` は少なくとも次を返します。
+
+- `board`
+- `record_index`
+- `ply`
+- `global_index`
+- `policy_target_index`
+- `final_result`
+- `final_margin_from_black`
+
+`dataset.get_targets(global_index)` は少なくとも次を返します。
+
+- `value_target`
+  - 現在手番視点の最終石差
+- `policy_target`
+  - shape `(64,)` の one-hot `numpy.ndarray(float32)`
 
 ## Examples
 

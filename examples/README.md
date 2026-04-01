@@ -46,7 +46,7 @@ uv run python examples/generate_training_data.py --output-dir examples/generated
 
 ## `pytorch_dataloader.py`
 
-保存済み JSONL ディレクトリを読み、PyTorch の map-style `Dataset` / `DataLoader` に流す参考例です。
+保存済み game record JSONL を `RecordDataset` 経由で読み、PyTorch の map-style `Dataset` / `DataLoader` に流す参考例です。
 
 - 1 index = 1 サンプル
 - batch 化は `collate_fn`
@@ -54,6 +54,8 @@ uv run python examples/generate_training_data.py --output-dir examples/generated
 - `policy + value`
 - CNN 用 `(B, 3, 8, 8)`
 - flat 用 `(B, 192)`
+- `RecordDataset` は policy 有効局面だけを index 対象にします
+- 単一ファイル path と複数ファイル path の両方を受けられます
 
 実行には PyTorch が必要です。リポジトリの標準依存には含めていません。
 
