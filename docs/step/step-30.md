@@ -17,6 +17,11 @@
 - このステップ中は `0.2.0` を維持する
 - このステップは `0.2.x` 系の学習支援拡張として扱う
 
+## version 更新
+
+- `Cargo.toml` と `pyproject.toml` は `0.2.1` に更新した
+- README の Release install URL も `v0.2.1` / `veloversi-0.2.1-*` に更新した
+
 ## このステップで行うこと
 
 - `RecordDataset` 相当の公開 API を追加する
