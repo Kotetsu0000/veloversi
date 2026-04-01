@@ -179,26 +179,35 @@ class RecordedBoard:
 
     @property
     def start_board(self) -> Board:
+        """recording の開始局面を返します。"""
         return self._start_board
 
     @property
     def current_board(self) -> Board:
+        """recording が現在保持している局面を返します。"""
         return self._current_board
 
     @property
     def black_bits(self) -> int:
+        """現在局面の黒石 bitboard を返します。"""
         return self.current_board.black_bits
 
     @property
     def white_bits(self) -> int:
+        """現在局面の白石 bitboard を返します。"""
         return self.current_board.white_bits
 
     @property
     def side_to_move(self) -> str:
+        """現在局面の手番を `"black"` または `"white"` で返します。"""
         return self.current_board.side_to_move
 
     @property
     def moves(self) -> list[int | None]:
+        """開始局面から現在局面までの手順を返します。
+
+        `None` は forced pass を表します。
+        """
         return list(self._moves)
 
     def to_bits(self) -> tuple[int, int, str]:
@@ -382,8 +391,23 @@ class RecordDataset:
             global_index: dataset 内の 0 始まりの通し番号。
 
         Returns:
-            少なくとも `board`, `record_index`, `ply`, `policy_target_index`,
-            `final_result`, `final_margin_from_black` を含む dict。
+            少なくとも次のキーを含む dict。
+
+            - `board`:
+              常に現在局面の `Board`。
+            - `record_index`:
+              入力ファイル群を連結した後の game record 番号。
+            - `ply`:
+              `start_board` から数えた 0 始まりの手数。
+            - `global_index`:
+              dataset 全体での 0 始まり通し番号。
+            - `policy_target_index`:
+              次手の着手位置。常に `0..63`。
+              pass や policy 無効局面は dataset index から除外されます。
+            - `final_result`:
+              `"black"`, `"white"`, `"draw"` のいずれか。
+            - `final_margin_from_black`:
+              終局時の `black - white`。
         """
         record_index, ply = self._resolve_index(global_index)
         record = self._records[record_index]
@@ -414,8 +438,10 @@ class RecordDataset:
         Returns:
             `value_target`:
                 現在手番視点の最終石差を `[-1, 1]` に正規化した `np.float32`。
+                計算式は `final_margin_from_side_to_move / 64.0` です。
             `policy_target`:
                 shape `(64,)` の one-hot `numpy.ndarray(float32)`。
+                `policy_target_index` に対応する要素だけが `1.0` です。
         """
         item = self.get(global_index)
         board = cast(Board, item["board"])
