@@ -320,8 +320,9 @@ def test_supervised_examples_from_trace_returns_prefix_examples() -> None:
 
     assert len(examples) == len(trace["boards"])
     for ply, example in enumerate(examples):
-        assert isinstance(example["board"], Board)
-        assert example["board"].to_bits() == trace["boards"][ply].to_bits()
+        board = cast(Board, example["board"])
+        assert isinstance(board, Board)
+        assert board.to_bits() == trace["boards"][ply].to_bits()
         assert example["ply"] == ply
         assert example["moves_until_here"] == trace["moves"][:ply]
         assert example["final_result"] == trace["final_result"]
@@ -794,7 +795,7 @@ def test_prepare_model_input_batch_is_batch_first() -> None:
 
 def test_prepare_model_input_rejects_invalid_value() -> None:
     with pytest.raises(TypeError):
-        prepare_cnn_model_input({"bad": "record"})
+        prepare_cnn_model_input({"bad": "record"})  # pyright: ignore[reportArgumentType]
 
 
 def test_encode_feature_batches_match_single_position_results() -> None:

@@ -84,6 +84,12 @@ uv run python examples/pytorch_dataloader.py
 - `RecordedBoard.save_record`
 - `load_game_records`
 
+補足:
+
+- `RecordedBoard.to_dict()` は進行中 recording の辞書化です
+- `RecordedBoard.finish()` は完成 game record を返します
+- `RecordedBoard.save_record(path)` は完成 game record を JSONL に追記します
+
 実行:
 
 ```bash

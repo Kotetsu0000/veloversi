@@ -210,6 +210,7 @@ recording API:
 recording は immutable で、Python では `RecordedBoard` として扱います。
 `RecordedBoard` は現在局面を内部に持ち、`Board` と近い操作感で使えます。
 `RecordedBoard.apply_move()` / `RecordedBoard.apply_forced_pass()` は、現在局面の更新に加えて履歴更新も行います。
+`Board` にある主要な method は `RecordedBoard` でも同名で使えます。
 
 最小例:
 
@@ -236,11 +237,20 @@ record.save_record("games.jsonl")
 record_dict = record.to_dict()
 ```
 
+`to_dict()` は進行中 recording の辞書化です。完成済み game record ではありません。
+含まれるのは少なくとも次です。
+
+- `start_board`
+- `current_board`
+- `moves`
+
 完成 game record を辞書として取得したい場合:
 
 ```python
 game_record = record.finish()
 ```
+
+`finish()` は終局局面でのみ成功し、保存用の完成 game record を返します。
 
 game record は JSONL の 1 行 1 試合です。  
 各 record は、少なくとも次を持ちます。

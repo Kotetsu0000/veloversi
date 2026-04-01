@@ -153,6 +153,8 @@ def _validate_feature_config(config: object) -> tuple[int, bool, bool, bool, str
 
 
 class RecordedBoard:
+    """Immutable board wrapper that also records moves from `start_board`."""
+
     __slots__ = ("_start_board", "_current_board", "_moves")
 
     def __init__(self, start_board: Board, current_board: Board, moves: list[int | None]) -> None:
@@ -251,6 +253,11 @@ class RecordedBoard:
         return prepare_flat_model_input(self)
 
     def to_dict(self) -> dict[str, object]:
+        """Return the in-progress recording as a plain dict.
+
+        This is not a finished game record. The result contains the current board state
+        together with the original `start_board` and the moves recorded so far.
+        """
         return {
             "start_board": self.start_board,
             "current_board": self.current_board,
@@ -258,9 +265,15 @@ class RecordedBoard:
         }
 
     def finish(self) -> dict[str, object]:
+        """Return a completed game record dict.
+
+        The current position must be terminal. The returned dict is the serializable
+        one-game record format used by `save_record()` and `append_game_record()`.
+        """
         return finish_game_recording(self)
 
     def save_record(self, path: str) -> None:
+        """Append the finished game record to `path` as one JSONL record."""
         append_game_record(path, self)
 
 
