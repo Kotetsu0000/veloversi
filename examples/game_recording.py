@@ -12,18 +12,17 @@ def main() -> None:
     record = vv.start_game_recording(board)
 
     while True:
-        board = record.current_board
-        status = vv.board_status(board)
+        status = record.board_status()
         if status == "terminal":
             break
         if status == "forced_pass":
             record = record.apply_forced_pass()
             continue
 
-        move = board.legal_moves_list()[0]
+        move = record.legal_moves_list()[0]
         record = record.apply_move(move)
 
-    game_record = vv.finish_game_recording(record)
+    game_record = record.finish()
     record.save_record(str(output_path))
     loaded = vv.load_game_records(str(output_path))
 

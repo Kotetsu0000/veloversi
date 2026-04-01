@@ -13,7 +13,9 @@
 - `pack_board` / `unpack_board`
 - `play_random_game`
 - `supervised_examples_from_trace`
-- `encode_planes` / `encode_flat_features`
+- `board.transform(...)`
+- `board.encode_planes(...)` / `board.encode_flat_features(...)`
+- `board.prepare_cnn_model_input()` / `board.prepare_flat_model_input()`
 - `sample_reachable_positions`
 
 実行:
@@ -75,7 +77,8 @@ uv run python examples/pytorch_dataloader.py
 - `start_game_recording`
 - `RecordedBoard.apply_move`
 - `RecordedBoard.apply_forced_pass`
-- `finish_game_recording`
+- `RecordedBoard.finish`
+- `RecordedBoard.to_dict`
 - `RecordedBoard.save_record`
 - `load_game_records`
 

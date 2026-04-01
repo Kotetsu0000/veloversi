@@ -223,6 +223,29 @@ class RecordedBoard:
     def final_margin_from_black(self) -> int:
         return final_margin_from_black(self)
 
+    def transform(self, sym: str) -> Board:
+        return transform_board(self.current_board, sym)
+
+    def encode_planes(
+        self,
+        history: list[Board],
+        config: dict,
+    ) -> np.ndarray:
+        return encode_planes(self.current_board, history, config)
+
+    def encode_flat_features(
+        self,
+        history: list[Board],
+        config: dict,
+    ) -> np.ndarray:
+        return encode_flat_features(self.current_board, history, config)
+
+    def prepare_cnn_model_input(self) -> np.ndarray:
+        return prepare_cnn_model_input(self)
+
+    def prepare_flat_model_input(self) -> np.ndarray:
+        return prepare_flat_model_input(self)
+
     def to_dict(self) -> dict[str, object]:
         return {
             "start_board": self.start_board,
@@ -382,6 +405,34 @@ def _board_final_margin_from_black(self: Board) -> int:
     return final_margin_from_black(self)
 
 
+def _board_transform(self: Board, sym: str) -> Board:
+    return transform_board(self, sym)
+
+
+def _board_encode_planes(
+    self: Board,
+    history: list[Board],
+    config: dict,
+) -> np.ndarray:
+    return encode_planes(self, history, config)
+
+
+def _board_encode_flat_features(
+    self: Board,
+    history: list[Board],
+    config: dict,
+) -> np.ndarray:
+    return encode_flat_features(self, history, config)
+
+
+def _board_prepare_cnn_model_input(self: Board) -> np.ndarray:
+    return prepare_cnn_model_input(self)
+
+
+def _board_prepare_flat_model_input(self: Board) -> np.ndarray:
+    return prepare_flat_model_input(self)
+
+
 Board.apply_move = _board_apply_move  # type: ignore[attr-defined]
 Board.apply_forced_pass = _board_apply_forced_pass  # type: ignore[attr-defined]
 Board.generate_legal_moves = _board_generate_legal_moves  # type: ignore[attr-defined]
@@ -391,6 +442,11 @@ Board.board_status = _board_board_status  # type: ignore[attr-defined]
 Board.disc_count = _board_disc_count  # type: ignore[attr-defined]
 Board.game_result = _board_game_result  # type: ignore[attr-defined]
 Board.final_margin_from_black = _board_final_margin_from_black  # type: ignore[attr-defined]
+Board.transform = _board_transform  # type: ignore[attr-defined]
+Board.encode_planes = _board_encode_planes  # type: ignore[attr-defined]
+Board.encode_flat_features = _board_encode_flat_features  # type: ignore[attr-defined]
+Board.prepare_cnn_model_input = _board_prepare_cnn_model_input  # type: ignore[attr-defined]
+Board.prepare_flat_model_input = _board_prepare_flat_model_input  # type: ignore[attr-defined]
 
 
 def play_random_game(seed: int, config: dict) -> dict:

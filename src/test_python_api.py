@@ -136,6 +136,29 @@ def test_board_method_style_api_matches_module_level_helpers() -> None:
     assert board.final_margin_from_black() == final_margin_from_black(board)
 
 
+def test_board_extended_method_style_api_matches_module_level_helpers() -> None:
+    board = initial_board()
+    history = [board.apply_move(19)]
+    config = {
+        "history_len": 1,
+        "include_legal_mask": True,
+        "include_phase_plane": False,
+        "include_turn_plane": False,
+        "perspective": "side_to_move",
+    }
+
+    assert board.transform("rot90").to_bits() == transform_board(board, "rot90").to_bits()
+    assert np.array_equal(
+        board.encode_planes(history, config), encode_planes(board, history, config)
+    )
+    assert np.array_equal(
+        board.encode_flat_features(history, config),
+        encode_flat_features(board, history, config),
+    )
+    assert np.array_equal(board.prepare_cnn_model_input(), prepare_cnn_model_input(board))
+    assert np.array_equal(board.prepare_flat_model_input(), prepare_flat_model_input(board))
+
+
 def test_step10_python_public_surface_matches_policy() -> None:
     assert not hasattr(veloversi, "apply_move_unchecked")
     assert not hasattr(veloversi, "generate_legal_moves_bits")
@@ -522,6 +545,30 @@ def test_recorded_board_method_style_api_matches_module_level_helpers() -> None:
     assert moved.disc_count() == disc_count(moved)
     assert moved.game_result() == game_result(moved)
     assert moved.final_margin_from_black() == final_margin_from_black(moved)
+
+
+def test_recorded_board_extended_methods_forward_to_current_board() -> None:
+    record = start_game_recording(initial_board()).apply_move(19)
+    current = record.current_board
+    history = [initial_board()]
+    config = {
+        "history_len": 1,
+        "include_legal_mask": True,
+        "include_phase_plane": False,
+        "include_turn_plane": False,
+        "perspective": "side_to_move",
+    }
+
+    assert record.transform("rot180").to_bits() == current.transform("rot180").to_bits()
+    assert np.array_equal(
+        record.encode_planes(history, config), current.encode_planes(history, config)
+    )
+    assert np.array_equal(
+        record.encode_flat_features(history, config),
+        current.encode_flat_features(history, config),
+    )
+    assert np.array_equal(record.prepare_cnn_model_input(), current.prepare_cnn_model_input())
+    assert np.array_equal(record.prepare_flat_model_input(), current.prepare_flat_model_input())
 
 
 def test_finish_game_recording_requires_terminal_board() -> None:

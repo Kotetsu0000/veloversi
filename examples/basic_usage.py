@@ -18,6 +18,7 @@ def main() -> None:
     restored = vv.unpack_board(packed)
     print("packed:", packed)
     print("restored:", restored.to_bits())
+    print("rot90:", next_board.transform("rot90").to_bits())
 
     trace = vv.play_random_game(7, {"max_plies": 8})
     print("trace plies:", trace["plies_played"])
@@ -46,10 +47,13 @@ def main() -> None:
         "include_turn_plane": True,
         "perspective": "side_to_move",
     }
-    planes = vv.encode_planes(trace["boards"][-1], history, feature_config)
-    flat = vv.encode_flat_features(trace["boards"][-1], history, feature_config)
+    feature_board = trace["boards"][-1]
+    planes = feature_board.encode_planes(history, feature_config)
+    flat = feature_board.encode_flat_features(history, feature_config)
     print("planes shape:", planes.shape)
     print("flat shape:", flat.shape)
+    print("cnn input shape:", feature_board.prepare_cnn_model_input().shape)
+    print("flat input shape:", feature_board.prepare_flat_model_input().shape)
 
     sampled = vv.sample_reachable_positions(
         11, {"num_positions": 3, "min_plies": 4, "max_plies": 8}
