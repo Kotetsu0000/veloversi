@@ -285,7 +285,8 @@ game record は JSONL の 1 行 1 試合です。
 
 - `len(dataset)` は全手数ではなく、policy target を持つ局面数です
 - pass や policy 無効局面は index 対象から除外されます
-- JSONL は append-only 前提です
+- 複数ファイルを渡した場合も、`global_index` はその連結集合に対する通し番号です
+- JSONL は append-only 前提です。既存 record の並び替えや書き換えをすると `global_index` の対応は変わります
 
 `dataset.get(global_index)` は少なくとも次を返します。
 

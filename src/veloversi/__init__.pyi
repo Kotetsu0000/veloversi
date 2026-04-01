@@ -8,6 +8,8 @@ from ._core import Board as Board
 __all__: list[str]
 
 class RecordedBoard:
+    @staticmethod
+    def new_initial() -> RecordedBoard: ...
     @property
     def start_board(self) -> Board: ...
     @property

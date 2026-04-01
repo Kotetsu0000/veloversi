@@ -56,6 +56,7 @@ uv run python examples/generate_training_data.py --output-dir examples/generated
 - flat 用 `(B, 192)`
 - `RecordDataset` は policy 有効局面だけを index 対象にします
 - 単一ファイル path と複数ファイル path の両方を受けられます
+- `len(dataset)` は全手数ではなく、policy target を持つ局面数です
 
 実行には PyTorch が必要です。リポジトリの標準依存には含めていません。
 

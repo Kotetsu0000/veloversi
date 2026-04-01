@@ -733,6 +733,28 @@ def test_open_game_record_dataset_accepts_single_path_and_multiple_paths(tmp_pat
     assert len(dataset_both) > len(dataset_a)
 
 
+def test_recorded_board_exposes_all_public_board_methods() -> None:
+    board_methods = {
+        name for name, value in vars(Board).items() if callable(value) and not name.startswith("_")
+    }
+    recorded_methods = {
+        name
+        for name, value in vars(RecordedBoard).items()
+        if callable(value) and not name.startswith("_")
+    }
+
+    assert board_methods <= recorded_methods
+
+
+def test_recorded_board_new_initial_matches_board_initial_state() -> None:
+    board = initial_board()
+    record = RecordedBoard.new_initial()
+
+    assert record.start_board.to_bits() == board.to_bits()
+    assert record.current_board.to_bits() == board.to_bits()
+    assert record.moves == []
+
+
 def test_encode_planes_and_flat_features_return_float32_arrays() -> None:
     board = initial_board()
     config = {

@@ -157,6 +157,10 @@ class RecordedBoard:
 
     __slots__ = ("_start_board", "_current_board", "_moves")
 
+    @staticmethod
+    def new_initial() -> "RecordedBoard":
+        return start_game_recording(initial_board())
+
     def __init__(self, start_board: Board, current_board: Board, moves: list[int | None]) -> None:
         self._start_board = start_board
         self._current_board = current_board
