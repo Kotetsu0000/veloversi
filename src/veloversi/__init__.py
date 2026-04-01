@@ -159,6 +159,17 @@ class RecordedBoard:
 
     @staticmethod
     def new_initial() -> "RecordedBoard":
+        """標準初期局面から recording を開始します。
+
+        Returns:
+            開始局面と現在局面がともに初期局面の `RecordedBoard`。
+
+        Example:
+            >>> import veloversi as vv
+            >>> record = vv.RecordedBoard.new_initial()
+            >>> record.legal_moves_list()
+            [19, 26, 37, 44]
+        """
         return start_game_recording(initial_board())
 
     def __init__(self, start_board: Board, current_board: Board, moves: list[int | None]) -> None:
@@ -191,9 +202,20 @@ class RecordedBoard:
         return list(self._moves)
 
     def to_bits(self) -> tuple[int, int, str]:
+        """現在局面を `(black_bits, white_bits, side_to_move)` で返します。"""
         return self.current_board.to_bits()
 
     def apply_move(self, square: int) -> "RecordedBoard":
+        """現在局面に着手し、履歴も更新した新しい recording を返します。
+
+        Args:
+            square: 0..63 のマス番号。
+
+        Example:
+            >>> import veloversi as vv
+            >>> record = vv.start_game_recording(vv.initial_board())
+            >>> next_record = record.apply_move(19)
+        """
         return _recording_from_parts(
             _record_move_parts(
                 self.start_board.to_bits(),
@@ -204,6 +226,7 @@ class RecordedBoard:
         )
 
     def apply_forced_pass(self) -> "RecordedBoard":
+        """強制パスを適用し、履歴も更新した新しい recording を返します。"""
         return _recording_from_parts(
             _record_pass_parts(
                 self.start_board.to_bits(),
@@ -213,27 +236,35 @@ class RecordedBoard:
         )
 
     def generate_legal_moves(self) -> int:
+        """現在局面の合法手 bitmask を返します。"""
         return generate_legal_moves(self)
 
     def legal_moves_list(self) -> list[int]:
+        """現在局面の合法手を昇順のマス番号 list で返します。"""
         return legal_moves_list(self)
 
     def is_legal_move(self, square: int) -> bool:
+        """現在局面で `square` が合法手なら `True` を返します。"""
         return is_legal_move(self, square)
 
     def board_status(self) -> str:
+        """現在局面の状態を返します。"""
         return board_status(self)
 
     def disc_count(self) -> tuple[int, int, int]:
+        """現在局面の `(black, white, empty)` の石数を返します。"""
         return disc_count(self)
 
     def game_result(self) -> str:
+        """現在局面の石数比較に基づく結果を返します。"""
         return game_result(self)
 
     def final_margin_from_black(self) -> int:
+        """現在局面の `black - white` を返します。"""
         return final_margin_from_black(self)
 
     def transform(self, sym: str) -> Board:
+        """現在局面に対称変換を適用した `Board` を返します。"""
         return transform_board(self.current_board, sym)
 
     def encode_planes(
@@ -241,6 +272,7 @@ class RecordedBoard:
         history: list[Board],
         config: dict,
     ) -> np.ndarray:
+        """現在局面を planes feature に変換します。"""
         return encode_planes(self.current_board, history, config)
 
     def encode_flat_features(
@@ -248,12 +280,15 @@ class RecordedBoard:
         history: list[Board],
         config: dict,
     ) -> np.ndarray:
+        """現在局面を flat feature に変換します。"""
         return encode_flat_features(self.current_board, history, config)
 
     def prepare_cnn_model_input(self) -> np.ndarray:
+        """現在局面を CNN 向け `(1, 3, 8, 8)` 入力に変換します。"""
         return prepare_cnn_model_input(self)
 
     def prepare_flat_model_input(self) -> np.ndarray:
+        """現在局面を flat/NNUE 風 `(1, 192)` 入力に変換します。"""
         return prepare_flat_model_input(self)
 
     def to_dict(self) -> dict[str, object]:
@@ -301,12 +336,15 @@ class RecordDataset:
         self._cumulative_positions = cumulative
 
     def __len__(self) -> int:
+        """policy target を持つ局面数を返します。"""
         return self._cumulative_positions[-1] if self._cumulative_positions else 0
 
     def len(self) -> int:
+        """`len(dataset)` と同じ値を返します。"""
         return len(self)
 
     def __getitem__(self, global_index: int) -> dict[str, object]:
+        """`get(global_index)` の別名です。"""
         return self.get(global_index)
 
     def _resolve_index(self, global_index: int) -> tuple[int, int]:
@@ -338,9 +376,14 @@ class RecordDataset:
         return board
 
     def get(self, global_index: int) -> dict[str, object]:
-        """Return one indexed position.
+        """通し番号で 1 局面の情報を返します。
 
-        The returned `board` is always the current `Board` at that ply.
+        Args:
+            global_index: dataset 内の 0 始まりの通し番号。
+
+        Returns:
+            少なくとも `board`, `record_index`, `ply`, `policy_target_index`,
+            `final_result`, `final_margin_from_black` を含む dict。
         """
         record_index, ply = self._resolve_index(global_index)
         record = self._records[record_index]
@@ -356,17 +399,24 @@ class RecordDataset:
         }
 
     def get_cnn_input(self, global_index: int) -> np.ndarray:
-        """Return one `(3, 8, 8)` CNN input sample."""
+        """通し番号で 1 局面の `(3, 8, 8)` CNN 入力を返します。"""
         board = cast(Board, self.get(global_index)["board"])
         return board.prepare_cnn_model_input()[0]
 
     def get_flat_input(self, global_index: int) -> np.ndarray:
-        """Return one `(192,)` flat input sample."""
+        """通し番号で 1 局面の `(192,)` flat 入力を返します。"""
         board = cast(Board, self.get(global_index)["board"])
         return board.prepare_flat_model_input()[0]
 
     def get_targets(self, global_index: int) -> dict[str, object]:
-        """Return `value_target` and `(64,)` float32 one-hot `policy_target`."""
+        """通し番号で 1 局面の教師データを返します。
+
+        Returns:
+            `value_target`:
+                現在手番視点の最終石差を `[-1, 1]` に正規化した `np.float32`。
+            `policy_target`:
+                shape `(64,)` の one-hot `numpy.ndarray(float32)`。
+        """
         item = self.get(global_index)
         board = cast(Board, item["board"])
         final_margin_from_black = cast(int, item["final_margin_from_black"])
@@ -389,6 +439,12 @@ def _recording_from_parts(
 
 
 def unpack_board(packed: tuple[int, int, str]) -> Board:
+    """`(black_bits, white_bits, side_to_move)` から `Board` を復元します。
+
+    Example:
+        >>> import veloversi as vv
+        >>> board = vv.unpack_board((34628173824, 68853694464, "black"))
+    """
     if type(packed) is not tuple or len(packed) != 3:
         raise ValueError("packed must be a tuple[int, int, str]")
 
@@ -452,18 +508,26 @@ def _board_from_board_or_record(value: object) -> Board:
 
 
 def generate_legal_moves(board_or_record: object) -> int:
+    """合法手 bitmask を返します。
+
+    Args:
+        board_or_record: `Board` または `RecordedBoard`。
+    """
     return _generate_legal_moves_core(_board_from_board_or_record(board_or_record))
 
 
 def validate_board(board_or_record: object) -> None:
+    """基本的な整合性を検証し、異常なら例外を送出します。"""
     _validate_board_core(_board_from_board_or_record(board_or_record))
 
 
 def legal_moves_list(board_or_record: object) -> list[int]:
+    """合法手を昇順のマス番号 list で返します。"""
     return _legal_moves_list_core(_board_from_board_or_record(board_or_record))
 
 
 def is_legal_move(board_or_record: object, square: int) -> bool:
+    """`square` が合法手なら `True` を返します。"""
     return _is_legal_move_core(
         _board_from_board_or_record(board_or_record),
         _validate_u16(square, "square"),
@@ -479,6 +543,10 @@ def apply_move(board_or_record: RecordedBoard, square: int) -> RecordedBoard: ..
 
 
 def apply_move(board_or_record: object, square: int) -> Board | RecordedBoard:
+    """着手後の新しい `Board` または `RecordedBoard` を返します。
+
+    `RecordedBoard` を渡した場合は、現在局面の更新に加えて履歴も更新します。
+    """
     if isinstance(board_or_record, RecordedBoard):
         return board_or_record.apply_move(square)
     return _apply_move_core(
@@ -496,72 +564,94 @@ def apply_forced_pass(board_or_record: RecordedBoard) -> RecordedBoard: ...
 
 
 def apply_forced_pass(board_or_record: object) -> Board | RecordedBoard:
+    """強制パス後の新しい `Board` または `RecordedBoard` を返します。"""
     if isinstance(board_or_record, RecordedBoard):
         return board_or_record.apply_forced_pass()
     return _apply_forced_pass_core(_board_from_board_or_record(board_or_record))
 
 
 def board_status(board_or_record: object) -> str:
+    """局面状態を返します。"""
     return _board_status_core(_board_from_board_or_record(board_or_record))
 
 
 def disc_count(board_or_record: object) -> tuple[int, int, int]:
+    """`(black, white, empty)` を返します。"""
     return _disc_count_core(_board_from_board_or_record(board_or_record))
 
 
 def game_result(board_or_record: object) -> str:
+    """現在局面の石数比較に基づく結果を返します。"""
     return _game_result_core(_board_from_board_or_record(board_or_record))
 
 
 def final_margin_from_black(board_or_record: object) -> int:
+    """`black - white` の石差を返します。"""
     return _final_margin_from_black_core(_board_from_board_or_record(board_or_record))
 
 
 def pack_board(board_or_record: object) -> tuple[int, int, str]:
+    """局面を `(black_bits, white_bits, side_to_move)` に変換します。"""
     return _pack_board_core(_board_from_board_or_record(board_or_record))
 
 
 def _board_apply_move(self: Board, square: int) -> Board:
+    """着手後の新しい盤面を返します。
+
+    Example:
+        >>> import veloversi as vv
+        >>> board = vv.initial_board()
+        >>> next_board = board.apply_move(19)
+    """
     result = apply_move(self, square)
     assert isinstance(result, Board)
     return result
 
 
 def _board_apply_forced_pass(self: Board) -> Board:
+    """強制パス後の新しい盤面を返します。"""
     result = apply_forced_pass(self)
     assert isinstance(result, Board)
     return result
 
 
 def _board_generate_legal_moves(self: Board) -> int:
+    """合法手 bitmask を返します。"""
     return generate_legal_moves(self)
 
 
 def _board_legal_moves_list(self: Board) -> list[int]:
+    """合法手を昇順のマス番号 list で返します。"""
     return legal_moves_list(self)
 
 
 def _board_is_legal_move(self: Board, square: int) -> bool:
+    """`square` が合法手なら `True` を返します。"""
     return is_legal_move(self, square)
 
 
 def _board_board_status(self: Board) -> str:
+    """局面状態を返します。"""
     return board_status(self)
 
 
 def _board_disc_count(self: Board) -> tuple[int, int, int]:
+    """`(black, white, empty)` を返します。"""
     return disc_count(self)
 
 
 def _board_game_result(self: Board) -> str:
+    """現在局面の石数比較に基づく結果を返します。"""
     return game_result(self)
 
 
 def _board_final_margin_from_black(self: Board) -> int:
+    """`black - white` の石差を返します。"""
     return final_margin_from_black(self)
 
 
 def _board_transform(self: Board, sym: str) -> Board:
+    """対称変換後の新しい盤面を返します。"""
     return transform_board(self, sym)
 
 
@@ -570,6 +660,7 @@ def _board_encode_planes(
     history: list[Board],
     config: dict,
 ) -> np.ndarray:
+    """盤面を planes feature に変換します。"""
     return encode_planes(self, history, config)
 
 
@@ -578,14 +669,17 @@ def _board_encode_flat_features(
     history: list[Board],
     config: dict,
 ) -> np.ndarray:
+    """盤面を flat feature に変換します。"""
     return encode_flat_features(self, history, config)
 
 
 def _board_prepare_cnn_model_input(self: Board) -> np.ndarray:
+    """盤面を CNN 向け `(1, 3, 8, 8)` 入力に変換します。"""
     return prepare_cnn_model_input(self)
 
 
 def _board_prepare_flat_model_input(self: Board) -> np.ndarray:
+    """盤面を flat/NNUE 風 `(1, 192)` 入力に変換します。"""
     return prepare_flat_model_input(self)
 
 
@@ -606,6 +700,12 @@ Board.prepare_flat_model_input = _board_prepare_flat_model_input  # type: ignore
 
 
 def play_random_game(seed: int, config: dict) -> dict:
+    """初期局面からランダムに対局を進め、trace を返します。
+
+    Args:
+        seed: 乱数 seed。
+        config: `{\"max_plies\": int | None}` を含む設定 dict。
+    """
     if type(config) is not dict:
         raise ValueError("config must be a dict")
 
@@ -625,10 +725,12 @@ def play_random_game(seed: int, config: dict) -> dict:
 
 
 def random_start_board(plies: int, seed: int) -> Board:
+    """初期局面から合法手で `plies` 手進めた開始局面を返します。"""
     return Board(*_random_start_board_parts(seed, _validate_u16(plies, "plies")))
 
 
 def sample_reachable_positions(seed: int, config: dict) -> list[Board]:
+    """到達可能局面をランダムサンプリングします。"""
     if type(config) is not dict:
         raise ValueError("config must be a dict")
 
@@ -646,34 +748,49 @@ def sample_reachable_positions(seed: int, config: dict) -> list[Board]:
 
 
 def start_game_recording(start_board: Board) -> RecordedBoard:
+    """任意局面を開始点として recording を開始します。
+
+    Example:
+        >>> import veloversi as vv
+        >>> start = vv.random_start_board(plies=6, seed=123)
+        >>> record = vv.start_game_recording(start)
+    """
     return _recording_from_parts(_start_game_recording_parts(start_board))
 
 
 def record_move(record: RecordedBoard, square: int) -> RecordedBoard:
+    """`RecordedBoard.apply_move()` の関数版です。"""
     if not isinstance(record, RecordedBoard):
         raise ValueError("record must be a RecordedBoard")
     return record.apply_move(square)
 
 
 def record_pass(record: RecordedBoard) -> RecordedBoard:
+    """`RecordedBoard.apply_forced_pass()` の関数版です。"""
     if not isinstance(record, RecordedBoard):
         raise ValueError("record must be a RecordedBoard")
     return record.apply_forced_pass()
 
 
 def current_board(record: RecordedBoard) -> Board:
+    """recording が保持している現在局面を返します。"""
     if not isinstance(record, RecordedBoard):
         raise ValueError("record must be a RecordedBoard")
     return record.current_board
 
 
 def finish_game_recording(record: RecordedBoard) -> dict[str, object]:
+    """終局済み recording を完成 game record に変換します。"""
     if not isinstance(record, RecordedBoard):
         raise ValueError("record must be a RecordedBoard")
     return _game_record_from_parts(_finish_game_recording_parts(*_recording_to_core_parts(record)))
 
 
 def append_game_record(path: str, record: object) -> None:
+    """game record を JSONL に 1 行追記します。
+
+    `record` に `RecordedBoard` を渡した場合は、内部で `finish()` 相当を行います。
+    """
     if type(path) is not str:
         raise ValueError("path must be a str")
     if isinstance(record, RecordedBoard):
@@ -682,13 +799,23 @@ def append_game_record(path: str, record: object) -> None:
 
 
 def load_game_records(path: str) -> list[dict[str, object]]:
+    """JSONL から game record を全件読み込みます。"""
     if type(path) is not str:
         raise ValueError("path must be a str")
     return [_game_record_from_parts(parts) for parts in _load_game_records_parts(path)]
 
 
 def open_game_record_dataset(paths: object) -> RecordDataset:
-    """Open one or more append-only game record JSONL files as one position dataset."""
+    """JSONL の game record 群を局面 index 付き dataset として開きます。
+
+    Args:
+        paths: 単一 path、または path の list。
+
+    Notes:
+        - index 対象は policy target を持つ局面のみです。
+        - pass 局面は dataset index から除外されます。
+        - JSONL は append-only 前提です。
+    """
     records: list[dict[str, object]] = []
     for path in _normalize_record_dataset_paths(paths):
         records.extend(load_game_records(path))
@@ -740,11 +867,16 @@ def _flat_features_for_board(board: Board) -> np.ndarray:
 
 
 def prepare_cnn_model_input(board_or_record: object) -> np.ndarray:
+    """現在局面から CNN 向け `(1, 3, 8, 8)` 入力を作ります。
+
+    `Board` と `RecordedBoard` の両方を受け取ります。
+    """
     board = _board_from_board_or_record(board_or_record)
     return _cnn_planes_for_board(board)[np.newaxis, ...]
 
 
 def prepare_cnn_model_input_batch(values: list[object]) -> np.ndarray:
+    """複数の盤面/recording から `(B, 3, 8, 8)` 入力を作ります。"""
     boards = _boards_from_board_or_record_batch(values)
     return np.stack([_cnn_planes_for_board(board) for board in boards], axis=0).astype(
         np.float32,
@@ -753,11 +885,13 @@ def prepare_cnn_model_input_batch(values: list[object]) -> np.ndarray:
 
 
 def prepare_flat_model_input(board_or_record: object) -> np.ndarray:
+    """現在局面から flat/NNUE 風 `(1, 192)` 入力を作ります。"""
     board = _board_from_board_or_record(board_or_record)
     return _flat_features_for_board(board)[np.newaxis, ...]
 
 
 def prepare_flat_model_input_batch(values: list[object]) -> np.ndarray:
+    """複数の盤面/recording から `(B, 192)` 入力を作ります。"""
     boards = _boards_from_board_or_record_batch(values)
     return np.stack([_flat_features_for_board(board) for board in boards], axis=0).astype(
         np.float32,
@@ -1022,6 +1156,7 @@ def _packed_example_to_core_parts(
 
 
 def supervised_examples_from_trace(trace: dict) -> list[dict[str, object]]:
+    """1 つの trace から supervised example 列を生成します。"""
     return [
         _example_from_parts(parts)
         for parts in _supervised_examples_from_trace_parts(*_trace_to_core_parts(trace))
@@ -1029,6 +1164,7 @@ def supervised_examples_from_trace(trace: dict) -> list[dict[str, object]]:
 
 
 def supervised_examples_from_traces(traces: list[dict]) -> list[dict[str, object]]:
+    """複数 trace から supervised example 列を連結して生成します。"""
     if type(traces) is not list:
         raise ValueError("traces must be a list[dict]")
     return [
@@ -1040,6 +1176,7 @@ def supervised_examples_from_traces(traces: list[dict]) -> list[dict[str, object
 
 
 def packed_supervised_examples_from_trace(trace: dict) -> list[dict[str, object]]:
+    """1 つの trace から packed supervised example 列を生成します。"""
     return [
         _packed_example_from_parts(parts)
         for parts in _packed_supervised_examples_from_trace_parts(*_trace_to_core_parts(trace))
@@ -1047,6 +1184,7 @@ def packed_supervised_examples_from_trace(trace: dict) -> list[dict[str, object]
 
 
 def packed_supervised_examples_from_traces(traces: list[dict]) -> list[dict[str, object]]:
+    """複数 trace から packed supervised example 列を連結して生成します。"""
     if type(traces) is not list:
         raise ValueError("traces must be a list[dict]")
     return [
@@ -1058,6 +1196,7 @@ def packed_supervised_examples_from_traces(traces: list[dict]) -> list[dict[str,
 
 
 def prepare_planes_learning_batch(examples: list[dict], config: dict) -> dict[str, np.ndarray]:
+    """packed supervised example 列から planes 学習 batch を作ります。"""
     if type(examples) is not list:
         raise ValueError("examples must be a list[dict]")
     features, value_targets, policy_targets, legal_move_masks = (
@@ -1075,6 +1214,7 @@ def prepare_planes_learning_batch(examples: list[dict], config: dict) -> dict[st
 
 
 def prepare_flat_learning_batch(examples: list[dict], config: dict) -> dict[str, np.ndarray]:
+    """packed supervised example 列から flat 学習 batch を作ります。"""
     if type(examples) is not list:
         raise ValueError("examples must be a list[dict]")
     features, value_targets, policy_targets, legal_move_masks = _prepare_flat_learning_batch_parts(
@@ -1090,6 +1230,7 @@ def prepare_flat_learning_batch(examples: list[dict], config: dict) -> dict[str,
 
 
 def encode_planes(board: Board, history: list[Board], config: dict) -> np.ndarray:
+    """盤面と history から planes feature を生成します。"""
     if type(history) is not list:
         raise ValueError("history must be a list[Board]")
 
@@ -1099,6 +1240,7 @@ def encode_planes(board: Board, history: list[Board], config: dict) -> np.ndarra
 def encode_planes_batch(
     boards: list[Board], histories: list[list[Board]], config: dict
 ) -> np.ndarray:
+    """複数盤面と history 列から planes feature batch を生成します。"""
     if type(boards) is not list:
         raise ValueError("boards must be a list[Board]")
     if type(histories) is not list:
@@ -1110,6 +1252,7 @@ def encode_planes_batch(
 
 
 def encode_flat_features(board: Board, history: list[Board], config: dict) -> np.ndarray:
+    """盤面と history から flat feature を生成します。"""
     if type(history) is not list:
         raise ValueError("history must be a list[Board]")
 
@@ -1119,6 +1262,7 @@ def encode_flat_features(board: Board, history: list[Board], config: dict) -> np
 def encode_flat_features_batch(
     boards: list[Board], histories: list[list[Board]], config: dict
 ) -> np.ndarray:
+    """複数盤面と history 列から flat feature batch を生成します。"""
     if type(boards) is not list:
         raise ValueError("boards must be a list[Board]")
     if type(histories) is not list:
