@@ -373,6 +373,7 @@ dependencies = [
  "numpy",
  "pyo3",
  "rayon",
+ "rustc-hash",
  "serde",
  "serde_json",
  "smallvec",

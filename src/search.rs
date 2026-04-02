@@ -2,11 +2,15 @@ use crate::engine::{
     Board, BoardStatus, Move, apply_forced_pass, apply_move_unchecked, board_status, disc_count,
     final_margin_from_side_to_move, generate_legal_moves, legal_moves_to_vec,
 };
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
+use std::sync::atomic::{AtomicI16, Ordering};
+use std::thread;
 use std::time::{Duration, Instant};
 
 const SCORE_MAX: i16 = 64;
 const SCORE_INF: i16 = 127;
+const EXACT_TT_MIN_EMPTY: u8 = 12;
+const EXACT_DEADLINE_CHECK_INTERVAL: u64 = 1024;
 const NOT_FILE_A: u64 = 0xFEFE_FEFE_FEFE_FEFE;
 const NOT_FILE_H: u64 = 0x7F7F_7F7F_7F7F_7F7F;
 const CORNER_MASK: u64 = 0x8100_0000_0000_0081;
@@ -92,6 +96,12 @@ struct SearchState {
     deadline: Option<Instant>,
 }
 
+struct ExactSearchState {
+    searched_nodes: u64,
+    transposition_table: TranspositionTable,
+    deadline: Option<Instant>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct BoardKey {
     black_bits: u64,
@@ -117,7 +127,7 @@ struct TranspositionEntry {
 
 #[derive(Default)]
 struct TranspositionTable {
-    entries: HashMap<BoardKey, TranspositionEntry>,
+    entries: FxHashMap<BoardKey, TranspositionEntry>,
 }
 
 #[derive(Clone, Copy)]
@@ -141,14 +151,14 @@ pub fn solve_exact(board: &Board, config: &SolveConfig) -> Result<SolveResult, S
         return Err(SolveError::NotEligible);
     }
 
-    let mut searched_nodes = 0;
-    let line = solve_exact_line(board, &mut searched_nodes, -SCORE_INF, SCORE_INF, None)
+    let mut state = ExactSearchState::new(None);
+    let line = solve_exact_line(board, -SCORE_INF, SCORE_INF, &mut state)
         .expect("solve_exact must not time out");
     Ok(SolveResult {
         best_move: line.best_move,
         exact_margin: line.exact_margin,
         pv: line.pv,
-        searched_nodes,
+        searched_nodes: state.searched_nodes,
     })
 }
 
@@ -157,23 +167,9 @@ pub fn search_best_move_exact(
     time_limit: Duration,
 ) -> Result<SolveResult, ExactSearchFailure> {
     let deadline = Instant::now() + time_limit;
-    let mut searched_nodes = 0;
-    let line = solve_exact_line(
-        board,
-        &mut searched_nodes,
-        -SCORE_INF,
-        SCORE_INF,
-        Some(deadline),
-    )
-    .map_err(|reason| ExactSearchFailure {
-        reason,
-        searched_nodes,
-    })?;
-    Ok(SolveResult {
-        best_move: line.best_move,
-        exact_margin: line.exact_margin,
-        pv: line.pv,
-        searched_nodes,
+    exact_search_best_move_parallel(board, deadline).map_err(|reason| ExactSearchFailure {
+        reason: ExactSearchFailureReason::Timeout,
+        searched_nodes: reason,
     })
 }
 
@@ -312,12 +308,43 @@ pub fn search_best_move(board: &Board, config: &SearchConfig) -> SearchResult {
 
 fn solve_exact_line(
     board: &Board,
-    searched_nodes: &mut u64,
     mut alpha: i16,
     beta: i16,
-    deadline: Option<Instant>,
+    state: &mut ExactSearchState,
 ) -> Result<ExactLine, ExactSearchFailureReason> {
-    *searched_nodes += 1;
+    state.searched_nodes += 1;
+
+    if state.time_limit_reached() {
+        return Err(ExactSearchFailureReason::Timeout);
+    }
+
+    let depth = disc_count(board).empty;
+    let use_tt = depth >= EXACT_TT_MIN_EMPTY;
+    let original_alpha = alpha;
+    let mut beta_bound = beta;
+    let key = BoardKey::new(board);
+    let mut tt_move = None;
+    if use_tt && let Some(entry) = state.transposition_table.lookup(key, depth) {
+        tt_move = entry.best_move;
+        match entry.bound {
+            BoundKind::Exact => {
+                return Ok(ExactLine {
+                    best_move: entry.best_move,
+                    exact_margin: entry.score,
+                    pv: entry.best_move.into_iter().collect(),
+                });
+            }
+            BoundKind::Lower => alpha = alpha.max(entry.score),
+            BoundKind::Upper => beta_bound = beta_bound.min(entry.score),
+        }
+        if alpha >= beta_bound {
+            return Ok(ExactLine {
+                best_move: entry.best_move,
+                exact_margin: entry.score,
+                pv: entry.best_move.into_iter().collect(),
+            });
+        }
+    }
 
     let legal = generate_legal_moves(board);
     if legal.count == 0 {
@@ -329,7 +356,7 @@ fn solve_exact_line(
             },
             BoardStatus::ForcedPass => {
                 let passed = apply_forced_pass(board).expect("forced pass must succeed");
-                let child = solve_exact_line(&passed, searched_nodes, -beta, -alpha, deadline)?;
+                let child = solve_exact_line(&passed, -beta_bound, -alpha, state)?;
                 ExactLine {
                     best_move: None,
                     exact_margin: -child.exact_margin,
@@ -341,23 +368,23 @@ fn solve_exact_line(
         return Ok(line);
     }
 
-    if let Some(deadline) = deadline
-        && Instant::now() >= deadline
-    {
-        return Err(ExactSearchFailureReason::Timeout);
-    }
-
     let mut best_move = None;
     let mut best_score = i16::MIN;
     let mut best_pv = Vec::new();
 
-    for ordered in ordered_moves(board, legal, None) {
-        if let Some(deadline) = deadline
-            && Instant::now() >= deadline
-        {
+    for ordered in ordered_moves(board, legal, tt_move) {
+        if state.time_limit_reached() {
             return Err(ExactSearchFailureReason::Timeout);
         }
-        let child = solve_exact_line(&ordered.next, searched_nodes, -beta, -alpha, deadline)?;
+        let child = if ordered.is_immediate_win {
+            ExactLine {
+                best_move: None,
+                exact_margin: -SCORE_MAX,
+                pv: Vec::new(),
+            }
+        } else {
+            solve_exact_line(&ordered.next, -beta_bound, -alpha, state)?
+        };
         let score = -child.exact_margin;
         if score > best_score {
             best_move = Some(ordered.mv);
@@ -367,15 +394,166 @@ fn solve_exact_line(
             best_pv.extend(child.pv);
         }
         alpha = alpha.max(score);
-        if alpha >= beta {
+        if alpha >= beta_bound {
             break;
         }
     }
 
-    Ok(ExactLine {
+    let line = ExactLine {
         best_move,
         exact_margin: best_score,
         pv: best_pv,
+    };
+    if use_tt {
+        state.transposition_table.store(
+            board,
+            TranspositionEntry {
+                depth,
+                bound: determine_bound(line.exact_margin, original_alpha, beta),
+                score: line.exact_margin,
+                best_move: line.best_move,
+                is_exact: true,
+            },
+        );
+    }
+    Ok(line)
+}
+
+fn exact_search_best_move_parallel(board: &Board, deadline: Instant) -> Result<SolveResult, u64> {
+    let legal = generate_legal_moves(board);
+    if legal.count == 0 {
+        let mut state = ExactSearchState::new(Some(deadline));
+        let line = solve_exact_line(board, -SCORE_INF, SCORE_INF, &mut state)
+            .map_err(|_| state.searched_nodes)?;
+        return Ok(SolveResult {
+            best_move: line.best_move,
+            exact_margin: line.exact_margin,
+            pv: line.pv,
+            searched_nodes: state.searched_nodes,
+        });
+    }
+
+    let ordered = ordered_moves(board, legal, None);
+    let empty = disc_count(board).empty;
+    let parallelism = thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    if parallelism <= 1 || ordered.len() <= 1 || empty < 18 || ordered.len() < 4 {
+        let mut state = ExactSearchState::new(Some(deadline));
+        let line = solve_exact_line(board, -SCORE_INF, SCORE_INF, &mut state)
+            .map_err(|_| state.searched_nodes)?;
+        return Ok(SolveResult {
+            best_move: line.best_move,
+            exact_margin: line.exact_margin,
+            pv: line.pv,
+            searched_nodes: state.searched_nodes,
+        });
+    }
+
+    let serial_prefix_len = ordered.len().min(3);
+    let mut best_idx = usize::MAX;
+    let mut best_move = Move { square: 0 };
+    let mut best_score = -SCORE_INF;
+    let mut best_pv = Vec::new();
+    let mut total_nodes = 1u64;
+
+    for (idx, candidate) in ordered.iter().copied().enumerate().take(serial_prefix_len) {
+        if Instant::now() >= deadline {
+            return Err(total_nodes);
+        }
+        let (score, pv, nodes) = if candidate.is_immediate_win {
+            (SCORE_MAX, vec![candidate.mv], 1u64)
+        } else {
+            let mut state = ExactSearchState::new(Some(deadline));
+            let child = solve_exact_line(&candidate.next, -SCORE_INF, -best_score, &mut state)
+                .map_err(|_| total_nodes + state.searched_nodes)?;
+            let score = -child.exact_margin;
+            let mut pv = Vec::with_capacity(child.pv.len() + 1);
+            pv.push(candidate.mv);
+            pv.extend(child.pv);
+            (score, pv, state.searched_nodes)
+        };
+        total_nodes += nodes;
+        if score > best_score || (score == best_score && idx < best_idx) {
+            best_idx = idx;
+            best_move = candidate.mv;
+            best_score = score;
+            best_pv = pv;
+        }
+        if best_score >= SCORE_MAX {
+            return Ok(SolveResult {
+                best_move: Some(best_move),
+                exact_margin: best_score,
+                pv: best_pv,
+                searched_nodes: total_nodes,
+            });
+        }
+    }
+
+    let shared_alpha = AtomicI16::new(best_score);
+    let mut results = Vec::with_capacity(ordered.len());
+    thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(ordered.len().saturating_sub(serial_prefix_len));
+        for (idx, candidate) in ordered.iter().copied().enumerate().skip(serial_prefix_len) {
+            let shared_alpha_ref = &shared_alpha;
+            handles.push(scope.spawn(move || {
+                if Instant::now() >= deadline {
+                    return Err(0u64);
+                }
+                if candidate.is_immediate_win {
+                    return Ok((idx, candidate.mv, SCORE_MAX, vec![candidate.mv], 1u64));
+                }
+                let alpha = shared_alpha_ref.load(Ordering::Relaxed);
+                let mut state = ExactSearchState::new(Some(deadline));
+                let child = solve_exact_line(&candidate.next, -SCORE_INF, -alpha, &mut state)
+                    .map_err(|_| state.searched_nodes)?;
+                let score = -child.exact_margin;
+                loop {
+                    let observed = shared_alpha_ref.load(Ordering::Relaxed);
+                    if score <= observed {
+                        break;
+                    }
+                    if shared_alpha_ref
+                        .compare_exchange(observed, score, Ordering::Relaxed, Ordering::Relaxed)
+                        .is_ok()
+                    {
+                        break;
+                    }
+                }
+                let mut pv = Vec::with_capacity(child.pv.len() + 1);
+                pv.push(candidate.mv);
+                pv.extend(child.pv);
+                Ok((idx, candidate.mv, score, pv, state.searched_nodes))
+            }));
+        }
+        for handle in handles {
+            results.push(handle.join().expect("exact worker must not panic"));
+        }
+    });
+
+    for result in results {
+        match result {
+            Ok((idx, mv, score, pv, nodes)) => {
+                total_nodes += nodes;
+                if score > best_score || (score == best_score && idx < best_idx) {
+                    best_idx = idx;
+                    best_move = mv;
+                    best_score = score;
+                    best_pv = pv;
+                }
+            }
+            Err(nodes) => {
+                total_nodes += nodes;
+                return Err(total_nodes);
+            }
+        }
+    }
+
+    Ok(SolveResult {
+        best_move: Some(best_move),
+        exact_margin: best_score,
+        pv: best_pv,
+        searched_nodes: total_nodes,
     })
 }
 
@@ -922,6 +1100,26 @@ impl SearchState {
     }
 }
 
+impl ExactSearchState {
+    fn new(deadline: Option<Instant>) -> Self {
+        Self {
+            searched_nodes: 0,
+            transposition_table: TranspositionTable::default(),
+            deadline,
+        }
+    }
+
+    fn time_limit_reached(&self) -> bool {
+        self.deadline.is_some_and(|deadline| {
+            (self.searched_nodes <= 1
+                || self
+                    .searched_nodes
+                    .is_multiple_of(EXACT_DEADLINE_CHECK_INTERVAL))
+                && Instant::now() >= deadline
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1102,6 +1300,10 @@ mod tests {
     }
 
     fn pick_multi_move_endgame_board() -> Board {
+        pick_endgame_board(6, 2)
+    }
+
+    fn pick_endgame_board(max_empty: u8, min_legal_count: u8) -> Board {
         for seed in 0..256 {
             let trace = play_random_game(
                 seed,
@@ -1112,12 +1314,14 @@ mod tests {
             for board in trace.boards {
                 let legal = generate_legal_moves(&board);
                 let empty = board.empty_bits().count_ones() as u8;
-                if empty <= 6 && legal.count >= 2 {
+                if empty <= max_empty && legal.count >= min_legal_count {
                     return board;
                 }
             }
         }
-        panic!("multi-move endgame board not found");
+        panic!(
+            "endgame board not found for max_empty={max_empty} min_legal_count={min_legal_count}"
+        );
     }
 
     #[test]
@@ -1258,6 +1462,181 @@ mod tests {
                 reason: ExactSearchFailureReason::Timeout,
                 searched_nodes: 1,
             })
+        );
+    }
+
+    #[test]
+    #[ignore = "benchmark helper"]
+    fn exact_search_bench_multi_move_endgame() {
+        let board = pick_multi_move_endgame_board();
+        let iterations = 10u32;
+
+        let serial_start = Instant::now();
+        let mut serial_nodes = 0u64;
+        for _ in 0..iterations {
+            let result = solve_exact(
+                &board,
+                &SolveConfig {
+                    exact_solver_empty_threshold: 6,
+                },
+            )
+            .expect("benchmark board must be exact-solvable");
+            serial_nodes += result.searched_nodes;
+        }
+        let serial_elapsed = serial_start.elapsed();
+
+        let parallel_start = Instant::now();
+        let mut parallel_nodes = 0u64;
+        for _ in 0..iterations {
+            let result = search_best_move_exact(&board, Duration::from_secs_f64(1.0))
+                .expect("benchmark board must finish within timeout");
+            parallel_nodes += result.searched_nodes;
+        }
+        let parallel_elapsed = parallel_start.elapsed();
+
+        eprintln!(
+            "exact bench multi-move endgame: iterations={iterations} serial={:?} parallel={:?} serial_nodes={} parallel_nodes={}",
+            serial_elapsed, parallel_elapsed, serial_nodes, parallel_nodes
+        );
+    }
+
+    #[test]
+    #[ignore = "benchmark helper"]
+    fn exact_search_bench_deeper_endgame() {
+        let board = pick_endgame_board(10, 4);
+        let iterations = 5u32;
+
+        let serial_start = Instant::now();
+        let mut serial_nodes = 0u64;
+        for _ in 0..iterations {
+            let result = solve_exact(
+                &board,
+                &SolveConfig {
+                    exact_solver_empty_threshold: 10,
+                },
+            )
+            .expect("benchmark board must be exact-solvable");
+            serial_nodes += result.searched_nodes;
+        }
+        let serial_elapsed = serial_start.elapsed();
+
+        let parallel_start = Instant::now();
+        let mut parallel_nodes = 0u64;
+        for _ in 0..iterations {
+            let result = search_best_move_exact(&board, Duration::from_secs_f64(5.0))
+                .expect("benchmark board must finish within timeout");
+            parallel_nodes += result.searched_nodes;
+        }
+        let parallel_elapsed = parallel_start.elapsed();
+
+        eprintln!(
+            "exact bench deeper endgame: iterations={iterations} serial={:?} parallel={:?} serial_nodes={} parallel_nodes={}",
+            serial_elapsed, parallel_elapsed, serial_nodes, parallel_nodes
+        );
+    }
+
+    #[test]
+    #[ignore = "benchmark helper"]
+    fn exact_search_bench_larger_endgame() {
+        let board = pick_endgame_board(12, 4);
+        let iterations = 3u32;
+
+        let serial_start = Instant::now();
+        let mut serial_nodes = 0u64;
+        for _ in 0..iterations {
+            let result = solve_exact(
+                &board,
+                &SolveConfig {
+                    exact_solver_empty_threshold: 12,
+                },
+            )
+            .expect("benchmark board must be exact-solvable");
+            serial_nodes += result.searched_nodes;
+        }
+        let serial_elapsed = serial_start.elapsed();
+
+        let parallel_start = Instant::now();
+        let mut parallel_nodes = 0u64;
+        for _ in 0..iterations {
+            let result = search_best_move_exact(&board, Duration::from_secs_f64(10.0))
+                .expect("benchmark board must finish within timeout");
+            parallel_nodes += result.searched_nodes;
+        }
+        let parallel_elapsed = parallel_start.elapsed();
+
+        eprintln!(
+            "exact bench larger endgame: iterations={iterations} serial={:?} parallel={:?} serial_nodes={} parallel_nodes={}",
+            serial_elapsed, parallel_elapsed, serial_nodes, parallel_nodes
+        );
+    }
+
+    #[test]
+    #[ignore = "benchmark helper"]
+    fn exact_search_bench_even_larger_endgame() {
+        let board = pick_endgame_board(14, 4);
+        let iterations = 2u32;
+
+        let serial_start = Instant::now();
+        let mut serial_nodes = 0u64;
+        for _ in 0..iterations {
+            let result = solve_exact(
+                &board,
+                &SolveConfig {
+                    exact_solver_empty_threshold: 14,
+                },
+            )
+            .expect("benchmark board must be exact-solvable");
+            serial_nodes += result.searched_nodes;
+        }
+        let serial_elapsed = serial_start.elapsed();
+
+        let parallel_start = Instant::now();
+        let mut parallel_nodes = 0u64;
+        for _ in 0..iterations {
+            let result = search_best_move_exact(&board, Duration::from_secs_f64(20.0))
+                .expect("benchmark board must finish within timeout");
+            parallel_nodes += result.searched_nodes;
+        }
+        let parallel_elapsed = parallel_start.elapsed();
+
+        eprintln!(
+            "exact bench even larger endgame: iterations={iterations} serial={:?} parallel={:?} serial_nodes={} parallel_nodes={}",
+            serial_elapsed, parallel_elapsed, serial_nodes, parallel_nodes
+        );
+    }
+
+    #[test]
+    #[ignore = "benchmark helper"]
+    fn exact_search_bench_sixteen_empty_endgame() {
+        let board = pick_endgame_board(16, 4);
+        let iterations = 1u32;
+
+        let serial_start = Instant::now();
+        let mut serial_nodes = 0u64;
+        for _ in 0..iterations {
+            let result = solve_exact(
+                &board,
+                &SolveConfig {
+                    exact_solver_empty_threshold: 16,
+                },
+            )
+            .expect("benchmark board must be exact-solvable");
+            serial_nodes += result.searched_nodes;
+        }
+        let serial_elapsed = serial_start.elapsed();
+
+        let parallel_start = Instant::now();
+        let mut parallel_nodes = 0u64;
+        for _ in 0..iterations {
+            let result = search_best_move_exact(&board, Duration::from_secs_f64(60.0))
+                .expect("benchmark board must finish within timeout");
+            parallel_nodes += result.searched_nodes;
+        }
+        let parallel_elapsed = parallel_start.elapsed();
+
+        eprintln!(
+            "exact bench sixteen-empty endgame: iterations={iterations} serial={:?} parallel={:?} serial_nodes={} parallel_nodes={}",
+            serial_elapsed, parallel_elapsed, serial_nodes, parallel_nodes
         );
     }
 
