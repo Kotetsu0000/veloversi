@@ -3,14 +3,18 @@ use crate::engine::{
     final_margin_from_side_to_move, generate_legal_moves, legal_moves_to_vec,
 };
 use rustc_hash::FxHashMap;
-use std::sync::atomic::{AtomicI16, Ordering};
+use rustc_hash::FxHasher;
+use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicI16, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 const SCORE_MAX: i16 = 64;
 const SCORE_INF: i16 = 127;
 const EXACT_TT_MIN_EMPTY: u8 = 12;
-const EXACT_DEADLINE_CHECK_INTERVAL: u64 = 1024;
+const EXACT_DEADLINE_CHECK_INTERVAL: u64 = 65536;
+const SHARED_EXACT_TT_SHARDS: usize = 64;
 const NOT_FILE_A: u64 = 0xFEFE_FEFE_FEFE_FEFE;
 const NOT_FILE_H: u64 = 0x7F7F_7F7F_7F7F_7F7F;
 const CORNER_MASK: u64 = 0x8100_0000_0000_0081;
@@ -99,6 +103,7 @@ struct SearchState {
 struct ExactSearchState {
     searched_nodes: u64,
     transposition_table: TranspositionTable,
+    shared_transposition_table: Option<Arc<SharedTranspositionTable>>,
     deadline: Option<Instant>,
 }
 
@@ -128,6 +133,10 @@ struct TranspositionEntry {
 #[derive(Default)]
 struct TranspositionTable {
     entries: FxHashMap<BoardKey, TranspositionEntry>,
+}
+
+struct SharedTranspositionTable {
+    shards: Vec<Mutex<FxHashMap<BoardKey, TranspositionEntry>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -324,7 +333,7 @@ fn solve_exact_line(
     let mut beta_bound = beta;
     let key = BoardKey::new(board);
     let mut tt_move = None;
-    if use_tt && let Some(entry) = state.transposition_table.lookup(key, depth) {
+    if use_tt && let Some(entry) = state.lookup_exact_entry(key, depth) {
         tt_move = entry.best_move;
         match entry.bound {
             BoundKind::Exact => {
@@ -405,7 +414,7 @@ fn solve_exact_line(
         pv: best_pv,
     };
     if use_tt {
-        state.transposition_table.store(
+        state.store_exact_entry(
             board,
             TranspositionEntry {
                 depth,
@@ -450,6 +459,135 @@ fn exact_search_best_move_parallel(board: &Board, deadline: Instant) -> Result<S
         });
     }
 
+    if empty < 20 {
+        return exact_search_best_move_parallel_unshared(&ordered, deadline);
+    }
+
+    let shared_tt = Arc::new(SharedTranspositionTable::new());
+    let serial_prefix_len = ordered.len().min(3);
+    let mut best_idx = usize::MAX;
+    let mut best_move = Move { square: 0 };
+    let mut best_score = -SCORE_INF;
+    let mut best_pv = Vec::new();
+    let mut total_nodes = 1u64;
+
+    for (idx, candidate) in ordered.iter().copied().enumerate().take(serial_prefix_len) {
+        if Instant::now() >= deadline {
+            return Err(total_nodes);
+        }
+        let (score, pv, nodes) = if candidate.is_immediate_win {
+            (SCORE_MAX, vec![candidate.mv], 1u64)
+        } else {
+            let mut state = ExactSearchState::with_shared_transposition_table(
+                Some(deadline),
+                Arc::clone(&shared_tt),
+            );
+            let child = solve_exact_line(&candidate.next, -SCORE_INF, -best_score, &mut state)
+                .map_err(|_| total_nodes + state.searched_nodes)?;
+            let score = -child.exact_margin;
+            let mut pv = Vec::with_capacity(child.pv.len() + 1);
+            pv.push(candidate.mv);
+            pv.extend(child.pv);
+            (score, pv, state.searched_nodes)
+        };
+        total_nodes += nodes;
+        if score > best_score || (score == best_score && idx < best_idx) {
+            best_idx = idx;
+            best_move = candidate.mv;
+            best_score = score;
+            best_pv = pv;
+        }
+        if best_score >= SCORE_MAX {
+            return Ok(SolveResult {
+                best_move: Some(best_move),
+                exact_margin: best_score,
+                pv: best_pv,
+                searched_nodes: total_nodes,
+            });
+        }
+    }
+
+    let shared_alpha = AtomicI16::new(best_score);
+    let next_task = AtomicUsize::new(serial_prefix_len);
+    let worker_count = parallelism.min(ordered.len().saturating_sub(serial_prefix_len));
+    let mut results = Vec::with_capacity(worker_count);
+    thread::scope(|scope| {
+        let ordered_ref = &ordered;
+        let mut handles = Vec::with_capacity(worker_count);
+        for _ in 0..worker_count {
+            let shared_alpha_ref = &shared_alpha;
+            let next_task_ref = &next_task;
+            let shared_tt_ref = Arc::clone(&shared_tt);
+            handles.push(scope.spawn(move || {
+                let mut state = ExactSearchState::with_shared_transposition_table(
+                    Some(deadline),
+                    shared_tt_ref,
+                );
+                let mut worker_results = Vec::new();
+                loop {
+                    let idx = next_task_ref.fetch_add(1, Ordering::Relaxed);
+                    if idx >= ordered_ref.len() {
+                        return Ok((worker_results, state.searched_nodes));
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(state.searched_nodes);
+                    }
+                    let candidate = ordered_ref[idx];
+                    if candidate.is_immediate_win {
+                        let score = SCORE_MAX;
+                        shared_alpha_ref.fetch_max(score, Ordering::Relaxed);
+                        worker_results.push((idx, candidate.mv, score, vec![candidate.mv]));
+                        continue;
+                    }
+                    let alpha = shared_alpha_ref.load(Ordering::Relaxed);
+                    let child = solve_exact_line(&candidate.next, -SCORE_INF, -alpha, &mut state)
+                        .map_err(|_| state.searched_nodes)?;
+                    let score = -child.exact_margin;
+                    shared_alpha_ref.fetch_max(score, Ordering::Relaxed);
+                    let mut pv = Vec::with_capacity(child.pv.len() + 1);
+                    pv.push(candidate.mv);
+                    pv.extend(child.pv);
+                    worker_results.push((idx, candidate.mv, score, pv));
+                }
+            }));
+        }
+        for handle in handles {
+            results.push(handle.join().expect("exact worker must not panic"));
+        }
+    });
+
+    for result in results {
+        match result {
+            Ok((worker_results, nodes)) => {
+                total_nodes += nodes;
+                for (idx, mv, score, pv) in worker_results {
+                    if score > best_score || (score == best_score && idx < best_idx) {
+                        best_idx = idx;
+                        best_move = mv;
+                        best_score = score;
+                        best_pv = pv;
+                    }
+                }
+            }
+            Err(nodes) => {
+                total_nodes += nodes;
+                return Err(total_nodes);
+            }
+        }
+    }
+
+    Ok(SolveResult {
+        best_move: Some(best_move),
+        exact_margin: best_score,
+        pv: best_pv,
+        searched_nodes: total_nodes,
+    })
+}
+
+fn exact_search_best_move_parallel_unshared(
+    ordered: &[OrderedMove],
+    deadline: Instant,
+) -> Result<SolveResult, u64> {
     let serial_prefix_len = ordered.len().min(3);
     let mut best_idx = usize::MAX;
     let mut best_move = Move { square: 0 };
@@ -480,18 +618,10 @@ fn exact_search_best_move_parallel(board: &Board, deadline: Instant) -> Result<S
             best_score = score;
             best_pv = pv;
         }
-        if best_score >= SCORE_MAX {
-            return Ok(SolveResult {
-                best_move: Some(best_move),
-                exact_margin: best_score,
-                pv: best_pv,
-                searched_nodes: total_nodes,
-            });
-        }
     }
 
     let shared_alpha = AtomicI16::new(best_score);
-    let mut results = Vec::with_capacity(ordered.len());
+    let mut results = Vec::with_capacity(ordered.len().saturating_sub(serial_prefix_len));
     thread::scope(|scope| {
         let mut handles = Vec::with_capacity(ordered.len().saturating_sub(serial_prefix_len));
         for (idx, candidate) in ordered.iter().copied().enumerate().skip(serial_prefix_len) {
@@ -1057,6 +1187,11 @@ impl BoardKey {
     }
 }
 
+fn should_replace_tt_entry(existing: TranspositionEntry, entry: TranspositionEntry) -> bool {
+    !(existing.depth > entry.depth
+        || (existing.depth == entry.depth && existing.bound == BoundKind::Exact))
+}
+
 impl TranspositionTable {
     fn lookup(&self, key: BoardKey, depth: u8) -> Option<TranspositionEntry> {
         self.entries
@@ -1074,11 +1209,46 @@ impl TranspositionTable {
     fn store(&mut self, board: &Board, entry: TranspositionEntry) {
         let key = BoardKey::new(board);
         match self.entries.get(&key).copied() {
-            Some(existing)
-                if existing.depth > entry.depth
-                    || (existing.depth == entry.depth && existing.bound == BoundKind::Exact) => {}
+            Some(existing) if !should_replace_tt_entry(existing, entry) => {}
             _ => {
                 self.entries.insert(key, entry);
+            }
+        }
+    }
+}
+
+impl SharedTranspositionTable {
+    fn new() -> Self {
+        Self {
+            shards: (0..SHARED_EXACT_TT_SHARDS)
+                .map(|_| Mutex::new(FxHashMap::default()))
+                .collect(),
+        }
+    }
+
+    fn shard_index(&self, key: BoardKey) -> usize {
+        let mut hasher = FxHasher::default();
+        key.hash(&mut hasher);
+        (hasher.finish() as usize) % self.shards.len()
+    }
+
+    fn lookup(&self, key: BoardKey, depth: u8) -> Option<TranspositionEntry> {
+        let shard = &self.shards[self.shard_index(key)];
+        let guard = shard.lock().expect("shared tt lock must not be poisoned");
+        guard
+            .get(&key)
+            .copied()
+            .filter(|entry| entry.depth >= depth)
+    }
+
+    fn store(&self, board: &Board, entry: TranspositionEntry) {
+        let key = BoardKey::new(board);
+        let shard = &self.shards[self.shard_index(key)];
+        let mut guard = shard.lock().expect("shared tt lock must not be poisoned");
+        match guard.get(&key).copied() {
+            Some(existing) if !should_replace_tt_entry(existing, entry) => {}
+            _ => {
+                guard.insert(key, entry);
             }
         }
     }
@@ -1105,6 +1275,19 @@ impl ExactSearchState {
         Self {
             searched_nodes: 0,
             transposition_table: TranspositionTable::default(),
+            shared_transposition_table: None,
+            deadline,
+        }
+    }
+
+    fn with_shared_transposition_table(
+        deadline: Option<Instant>,
+        shared_transposition_table: Arc<SharedTranspositionTable>,
+    ) -> Self {
+        Self {
+            searched_nodes: 0,
+            transposition_table: TranspositionTable::default(),
+            shared_transposition_table: Some(shared_transposition_table),
             deadline,
         }
     }
@@ -1118,24 +1301,41 @@ impl ExactSearchState {
                 && Instant::now() >= deadline
         })
     }
+
+    fn lookup_exact_entry(&self, key: BoardKey, depth: u8) -> Option<TranspositionEntry> {
+        self.transposition_table.lookup(key, depth).or_else(|| {
+            self.shared_transposition_table
+                .as_ref()
+                .and_then(|table| table.lookup(key, depth))
+        })
+    }
+
+    fn store_exact_entry(&mut self, board: &Board, entry: TranspositionEntry) {
+        self.transposition_table.store(board, entry);
+        if let Some(table) = self.shared_transposition_table.as_ref() {
+            table.store(board, entry);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        BoardKey, BoundKind, CORNER_MASK, EDGE_MASK, ExactSearchFailureReason, SCORE_INF,
-        SCORE_MAX, ScoreKind, SearchConfig, SearchLine, SearchResult, SearchState, SolveConfig,
-        SolveError, TranspositionEntry, TranspositionTable, can_solve_exact,
+        BoardKey, BoundKind, CORNER_MASK, EDGE_MASK, ExactSearchFailureReason, ExactSearchState,
+        SCORE_INF, SCORE_MAX, ScoreKind, SearchConfig, SearchLine, SearchResult, SearchState,
+        SolveConfig, SolveError, TranspositionEntry, TranspositionTable, can_solve_exact,
         corner_closeness_penalty, deadline_from_config, determine_bound, frontier_count,
         is_immediate_win_priority, leaf_score, mid_evaluate_diff, neighbor_mask, opponent_board,
         ordered_moves, oriented_bits, potential_mobility, search_best_move, search_best_move_exact,
-        solve_exact, update_root_candidates,
+        solve_exact, solve_exact_line, update_root_candidates,
     };
     use crate::engine::{
         Board, BoardStatus, Color, Move, apply_forced_pass, apply_move_unchecked, board_status,
         final_margin_from_side_to_move, generate_legal_moves, legal_moves_to_vec,
     };
     use crate::random_play::{RandomPlayConfig, play_random_game};
+    use std::sync::atomic::{AtomicI16, Ordering};
+    use std::thread;
     use std::time::{Duration, Instant};
 
     fn bit(square: u8) -> u64 {
@@ -1322,6 +1522,159 @@ mod tests {
         panic!(
             "endgame board not found for max_empty={max_empty} min_legal_count={min_legal_count}"
         );
+    }
+
+    fn pick_exact_empty_endgame_board(target_empty: u8, min_legal_count: u8) -> Board {
+        for seed in 0..256 {
+            let trace = play_random_game(
+                seed,
+                &RandomPlayConfig {
+                    max_plies: Some(60),
+                },
+            );
+            for board in trace.boards {
+                let legal = generate_legal_moves(&board);
+                let empty = board.empty_bits().count_ones() as u8;
+                if empty == target_empty && legal.count >= min_legal_count {
+                    return board;
+                }
+            }
+        }
+        panic!(
+            "endgame board not found for target_empty={target_empty} min_legal_count={min_legal_count}"
+        );
+    }
+
+    fn step32_parallel_exact_search_best_move(
+        board: &Board,
+        deadline: Instant,
+    ) -> Result<super::SolveResult, u64> {
+        let legal = generate_legal_moves(board);
+        if legal.count == 0 {
+            let mut state = ExactSearchState::new(Some(deadline));
+            let line = solve_exact_line(board, -SCORE_INF, SCORE_INF, &mut state)
+                .map_err(|_| state.searched_nodes)?;
+            return Ok(super::SolveResult {
+                best_move: line.best_move,
+                exact_margin: line.exact_margin,
+                pv: line.pv,
+                searched_nodes: state.searched_nodes,
+            });
+        }
+
+        let ordered = ordered_moves(board, legal, None);
+        let parallelism = thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        if parallelism <= 1 || ordered.len() <= 1 || ordered.len() < 4 {
+            let mut state = ExactSearchState::new(Some(deadline));
+            let line = solve_exact_line(board, -SCORE_INF, SCORE_INF, &mut state)
+                .map_err(|_| state.searched_nodes)?;
+            return Ok(super::SolveResult {
+                best_move: line.best_move,
+                exact_margin: line.exact_margin,
+                pv: line.pv,
+                searched_nodes: state.searched_nodes,
+            });
+        }
+
+        let serial_prefix_len = ordered.len().min(3);
+        let mut best_idx = usize::MAX;
+        let mut best_move = Move { square: 0 };
+        let mut best_score = -SCORE_INF;
+        let mut best_pv = Vec::new();
+        let mut total_nodes = 1u64;
+
+        for (idx, candidate) in ordered.iter().copied().enumerate().take(serial_prefix_len) {
+            if Instant::now() >= deadline {
+                return Err(total_nodes);
+            }
+            let (score, pv, nodes) = if candidate.is_immediate_win {
+                (SCORE_MAX, vec![candidate.mv], 1u64)
+            } else {
+                let mut state = ExactSearchState::new(Some(deadline));
+                let child = solve_exact_line(&candidate.next, -SCORE_INF, -best_score, &mut state)
+                    .map_err(|_| total_nodes + state.searched_nodes)?;
+                let score = -child.exact_margin;
+                let mut pv = Vec::with_capacity(child.pv.len() + 1);
+                pv.push(candidate.mv);
+                pv.extend(child.pv);
+                (score, pv, state.searched_nodes)
+            };
+            total_nodes += nodes;
+            if score > best_score || (score == best_score && idx < best_idx) {
+                best_idx = idx;
+                best_move = candidate.mv;
+                best_score = score;
+                best_pv = pv;
+            }
+        }
+
+        let shared_alpha = AtomicI16::new(best_score);
+        let mut results = Vec::with_capacity(ordered.len());
+        thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(ordered.len().saturating_sub(serial_prefix_len));
+            for (idx, candidate) in ordered.iter().copied().enumerate().skip(serial_prefix_len) {
+                let shared_alpha_ref = &shared_alpha;
+                handles.push(scope.spawn(move || {
+                    if Instant::now() >= deadline {
+                        return Err(0u64);
+                    }
+                    if candidate.is_immediate_win {
+                        return Ok((idx, candidate.mv, SCORE_MAX, vec![candidate.mv], 1u64));
+                    }
+                    let alpha = shared_alpha_ref.load(Ordering::Relaxed);
+                    let mut state = ExactSearchState::new(Some(deadline));
+                    let child = solve_exact_line(&candidate.next, -SCORE_INF, -alpha, &mut state)
+                        .map_err(|_| state.searched_nodes)?;
+                    let score = -child.exact_margin;
+                    loop {
+                        let observed = shared_alpha_ref.load(Ordering::Relaxed);
+                        if score <= observed {
+                            break;
+                        }
+                        if shared_alpha_ref
+                            .compare_exchange(observed, score, Ordering::Relaxed, Ordering::Relaxed)
+                            .is_ok()
+                        {
+                            break;
+                        }
+                    }
+                    let mut pv = Vec::with_capacity(child.pv.len() + 1);
+                    pv.push(candidate.mv);
+                    pv.extend(child.pv);
+                    Ok((idx, candidate.mv, score, pv, state.searched_nodes))
+                }));
+            }
+            for handle in handles {
+                results.push(handle.join().expect("exact worker must not panic"));
+            }
+        });
+
+        for result in results {
+            match result {
+                Ok((idx, mv, score, pv, nodes)) => {
+                    total_nodes += nodes;
+                    if score > best_score || (score == best_score && idx < best_idx) {
+                        best_idx = idx;
+                        best_move = mv;
+                        best_score = score;
+                        best_pv = pv;
+                    }
+                }
+                Err(nodes) => {
+                    total_nodes += nodes;
+                    return Err(total_nodes);
+                }
+            }
+        }
+
+        Ok(super::SolveResult {
+            best_move: Some(best_move),
+            exact_margin: best_score,
+            pv: best_pv,
+            searched_nodes: total_nodes,
+        })
     }
 
     #[test]
@@ -1637,6 +1990,54 @@ mod tests {
         eprintln!(
             "exact bench sixteen-empty endgame: iterations={iterations} serial={:?} parallel={:?} serial_nodes={} parallel_nodes={}",
             serial_elapsed, parallel_elapsed, serial_nodes, parallel_nodes
+        );
+    }
+
+    #[test]
+    #[ignore = "benchmark helper"]
+    fn exact_search_bench_step32_vs_step33_eighteen_empty() {
+        let board = pick_exact_empty_endgame_board(18, 4);
+
+        let step32_start = Instant::now();
+        let step32 = step32_parallel_exact_search_best_move(
+            &board,
+            Instant::now() + Duration::from_secs(60),
+        )
+        .expect("step32 benchmark board must finish");
+        let step32_elapsed = step32_start.elapsed();
+
+        let step33_start = Instant::now();
+        let step33 = search_best_move_exact(&board, Duration::from_secs(60))
+            .expect("step33 benchmark board must finish");
+        let step33_elapsed = step33_start.elapsed();
+
+        eprintln!(
+            "exact bench step32-vs-step33 empty18: step32={:?} step33={:?} step32_nodes={} step33_nodes={}",
+            step32_elapsed, step33_elapsed, step32.searched_nodes, step33.searched_nodes
+        );
+    }
+
+    #[test]
+    #[ignore = "benchmark helper"]
+    fn exact_search_bench_step32_vs_step33_twenty_empty() {
+        let board = pick_exact_empty_endgame_board(20, 4);
+
+        let step32_start = Instant::now();
+        let step32 = step32_parallel_exact_search_best_move(
+            &board,
+            Instant::now() + Duration::from_secs(60),
+        )
+        .expect("step32 benchmark board must finish");
+        let step32_elapsed = step32_start.elapsed();
+
+        let step33_start = Instant::now();
+        let step33 = search_best_move_exact(&board, Duration::from_secs(60))
+            .expect("step33 benchmark board must finish");
+        let step33_elapsed = step33_start.elapsed();
+
+        eprintln!(
+            "exact bench step32-vs-step33 empty20: step32={:?} step33={:?} step32_nodes={} step33_nodes={}",
+            step32_elapsed, step33_elapsed, step32.searched_nodes, step33.searched_nodes
         );
     }
 
