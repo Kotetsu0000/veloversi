@@ -36,8 +36,9 @@ pub use recording::{
     start_game_recording,
 };
 pub use search::{
-    ScoreKind, SearchConfig, SearchResult, SolveConfig, SolveError, SolveResult, can_solve_exact,
-    search_best_move, solve_exact,
+    ExactSearchFailure, ExactSearchFailureReason, ScoreKind, SearchConfig, SearchResult,
+    SolveConfig, SolveError, SolveResult, can_solve_exact, search_best_move,
+    search_best_move_exact, solve_exact,
 };
 pub use serialize::{PackedBoard, pack_board, unpack_board};
 pub use symmetry::{Symmetry, all_symmetries, transform_board, transform_square};

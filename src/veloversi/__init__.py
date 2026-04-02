@@ -1,5 +1,6 @@
 from bisect import bisect_right
 from pathlib import Path
+import time
 from typing import cast, overload
 
 import numpy as np
@@ -21,6 +22,7 @@ from ._core import (
     _record_move_parts,
     _record_pass_parts,
     _sample_reachable_positions_parts,
+    _search_best_move_exact_parts,
     _start_game_recording_parts,
     _supervised_examples_from_trace_parts,
     _supervised_examples_from_traces_parts,
@@ -92,6 +94,7 @@ __all__ = [
     "unpack_board",
     "transform_board",
     "transform_square",
+    "search_best_move_exact",
 ]
 
 
@@ -299,6 +302,18 @@ class RecordedBoard:
     def prepare_flat_model_input(self) -> np.ndarray:
         """現在局面を flat/NNUE 風 `(1, 192)` 入力に変換します。"""
         return prepare_flat_model_input(self)
+
+    def search_best_move_exact(self, timeout_seconds: float = 1.0) -> dict[str, object]:
+        """現在局面を全探索し、最善手を返します。
+
+        Args:
+            timeout_seconds: 探索の制限時間。既定値は `1.0` 秒です。
+
+        Notes:
+            `RecordedBoard` では `current_board` を探索対象にします。
+            timeout を超えた場合は partial result ではなく失敗結果を返します。
+        """
+        return search_best_move_exact(self, timeout_seconds)
 
     def to_dict(self) -> dict[str, object]:
         """Return the in-progress recording as a plain dict.
@@ -709,6 +724,14 @@ def _board_prepare_flat_model_input(self: Board) -> np.ndarray:
     return prepare_flat_model_input(self)
 
 
+def _board_search_best_move_exact(self: Board, timeout_seconds: float = 1.0) -> dict[str, object]:
+    """盤面を全探索し、最善手を返します。
+
+    timeout を超えた場合は partial result ではなく失敗結果を返します。
+    """
+    return search_best_move_exact(self, timeout_seconds)
+
+
 Board.apply_move = _board_apply_move  # type: ignore[attr-defined]
 Board.apply_forced_pass = _board_apply_forced_pass  # type: ignore[attr-defined]
 Board.generate_legal_moves = _board_generate_legal_moves  # type: ignore[attr-defined]
@@ -723,6 +746,7 @@ Board.encode_planes = _board_encode_planes  # type: ignore[attr-defined]
 Board.encode_flat_features = _board_encode_flat_features  # type: ignore[attr-defined]
 Board.prepare_cnn_model_input = _board_prepare_cnn_model_input  # type: ignore[attr-defined]
 Board.prepare_flat_model_input = _board_prepare_flat_model_input  # type: ignore[attr-defined]
+Board.search_best_move_exact = _board_search_best_move_exact  # type: ignore[attr-defined]
 
 
 def play_random_game(seed: int, config: dict) -> dict:
@@ -923,6 +947,49 @@ def prepare_flat_model_input_batch(values: list[object]) -> np.ndarray:
         np.float32,
         copy=False,
     )
+
+
+def search_best_move_exact(
+    board_or_record: object, timeout_seconds: float = 1.0
+) -> dict[str, object]:
+    """全探索で最善手を探します。
+
+    Args:
+        board_or_record: `Board` または `RecordedBoard`。
+        timeout_seconds: 探索の制限時間。既定値は `1.0` 秒です。
+
+    Returns:
+        次のキーを持つ dict。
+
+        - `success`: 探索成功なら `True`
+        - `best_move`: 最善手。失敗時は `None`
+        - `exact_margin`: 現在手番視点の厳密石差。失敗時は `None`
+        - `pv`: 読み筋。失敗時は空 list
+        - `searched_nodes`: 探索ノード数
+        - `elapsed_seconds`: 実行時間
+        - `failure_reason`: 失敗理由。成功時は `None`
+    """
+    if not isinstance(timeout_seconds, (int, float)) or not np.isfinite(timeout_seconds):
+        raise ValueError("timeout_seconds must be a finite float >= 0.0")
+    timeout_value = float(timeout_seconds)
+    if timeout_value < 0.0:
+        raise ValueError("timeout_seconds must be a finite float >= 0.0")
+
+    board = _board_from_board_or_record(board_or_record)
+    start = time.perf_counter()
+    success, best_move, exact_margin, pv, searched_nodes, failure_reason = (
+        _search_best_move_exact_parts(board, timeout_value)
+    )
+    elapsed_seconds = time.perf_counter() - start
+    return {
+        "success": success,
+        "best_move": best_move,
+        "exact_margin": exact_margin,
+        "pv": list(pv),
+        "searched_nodes": searched_nodes,
+        "elapsed_seconds": elapsed_seconds,
+        "failure_reason": failure_reason,
+    }
 
 
 def _validate_random_game_trace(trace: object) -> dict[object, object]:

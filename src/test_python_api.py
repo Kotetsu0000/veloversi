@@ -36,6 +36,7 @@ from veloversi import (
     random_start_board,
     record_move,
     record_pass,
+    search_best_move_exact,
     start_game_recording,
     finish_game_recording,
     append_game_record,
@@ -571,6 +572,43 @@ def test_recorded_board_extended_methods_forward_to_current_board() -> None:
     )
     assert np.array_equal(record.prepare_cnn_model_input(), current.prepare_cnn_model_input())
     assert np.array_equal(record.prepare_flat_model_input(), current.prepare_flat_model_input())
+
+
+def test_search_best_move_exact_succeeds_on_small_endgame_for_board_and_record() -> None:
+    board = board_from_bits(0xFFFF_FFFF_FFFF_FF7E, 0x0000_0000_0000_0080, "white")
+    record = start_game_recording(board)
+
+    result = search_best_move_exact(board, 1.0)
+    board_method = board.search_best_move_exact(1.0)
+    record_method = record.search_best_move_exact(1.0)
+
+    for candidate in (result, board_method, record_method):
+        assert candidate["success"] is True
+        assert candidate["best_move"] == 0
+        assert candidate["exact_margin"] == -48
+        assert candidate["pv"] == [0]
+        assert cast(int, candidate["searched_nodes"]) >= 1
+        assert candidate["failure_reason"] is None
+        assert cast(float, candidate["elapsed_seconds"]) >= 0.0
+
+
+def test_search_best_move_exact_returns_timeout_failure() -> None:
+    result = search_best_move_exact(initial_board(), 0.0)
+
+    assert result["success"] is False
+    assert result["best_move"] is None
+    assert result["exact_margin"] is None
+    assert result["pv"] == []
+    assert result["failure_reason"] == "timeout"
+    assert cast(float, result["elapsed_seconds"]) >= 0.0
+
+
+def test_search_best_move_exact_rejects_invalid_timeout() -> None:
+    with pytest.raises(ValueError, match="timeout_seconds"):
+        search_best_move_exact(initial_board(), -0.1)
+
+    with pytest.raises(ValueError, match="timeout_seconds"):
+        search_best_move_exact(initial_board(), float("nan"))
 
 
 def test_finish_game_recording_requires_terminal_board() -> None:

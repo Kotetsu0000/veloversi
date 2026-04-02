@@ -3,12 +3,16 @@ use ndarray::{Array1, Array2, Array3, Array4};
 #[cfg(not(any(test, coverage)))]
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyArray3, PyArray4};
 use pyo3::prelude::*;
+#[cfg(not(any(test, coverage)))]
+use std::time::Duration;
 
 use crate::{
     Board, BoardStatus, Color, Symmetry, all_symmetries, apply_forced_pass, apply_move,
     board_status, disc_count, final_margin_from_black, game_result, generate_legal_moves,
     is_legal_move, legal_moves_to_vec, transform_board, transform_square,
 };
+#[cfg(not(any(test, coverage)))]
+use crate::{ExactSearchFailureReason, SolveResult};
 #[cfg(not(any(test, coverage)))]
 use crate::{
     FeatureConfig, FeaturePerspective, Move, PackedBoard, PackedSupervisedExample, RandomGameTrace,
@@ -17,8 +21,8 @@ use crate::{
     load_game_records, pack_board, packed_supervised_examples_from_trace,
     packed_supervised_examples_from_traces, play_random_game, prepare_flat_learning_batch,
     prepare_planes_learning_batch, random_start_board, record_move, record_pass,
-    sample_reachable_positions, start_game_recording, supervised_examples_from_trace,
-    supervised_examples_from_traces, unpack_board,
+    sample_reachable_positions, search_best_move_exact, start_game_recording,
+    supervised_examples_from_trace, supervised_examples_from_traces, unpack_board,
 };
 
 #[pyclass(name = "Board")]
@@ -195,6 +199,16 @@ type PyPreparedFlatBatch<'py> = (
 );
 
 #[cfg(not(any(test, coverage)))]
+type PyExactSearchParts = (
+    bool,
+    Option<u8>,
+    Option<i16>,
+    Vec<u8>,
+    u64,
+    Option<&'static str>,
+);
+
+#[cfg(not(any(test, coverage)))]
 fn supervised_example_to_py_parts(example: &SupervisedExample) -> PySupervisedExampleParts {
     (
         board_to_py_tuple(&example.board),
@@ -282,6 +296,18 @@ fn game_recording_from_py_parts(
         current_board,
         moves,
     })
+}
+
+#[cfg(not(any(test, coverage)))]
+fn solve_result_to_py_parts(result: SolveResult) -> PyExactSearchParts {
+    (
+        true,
+        move_to_py_option_square(result.best_move),
+        Some(result.exact_margin),
+        result.pv.into_iter().map(|mv| mv.square).collect(),
+        result.searched_nodes,
+        None,
+    )
 }
 
 #[cfg(not(any(test, coverage)))]
@@ -972,6 +998,34 @@ fn encode_flat_features_batch_parts_py<'py>(
     Ok(array.into_pyarray(py))
 }
 
+#[pyfunction(name = "_search_best_move_exact_parts")]
+#[cfg(not(any(test, coverage)))]
+fn search_best_move_exact_parts_py(
+    board: &PyBoard,
+    timeout_seconds: f64,
+) -> PyResult<PyExactSearchParts> {
+    if !timeout_seconds.is_finite() || timeout_seconds < 0.0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "timeout_seconds must be a finite float >= 0.0",
+        ));
+    }
+
+    let duration = Duration::from_secs_f64(timeout_seconds);
+    match search_best_move_exact(&board.inner, duration) {
+        Ok(result) => Ok(solve_result_to_py_parts(result)),
+        Err(err) => Ok((
+            false,
+            None,
+            None,
+            Vec::new(),
+            err.searched_nodes,
+            Some(match err.reason {
+                ExactSearchFailureReason::Timeout => "timeout",
+            }),
+        )),
+    }
+}
+
 #[pyfunction(name = "generate_legal_moves")]
 fn generate_legal_moves_py(board: &PyBoard) -> u64 {
     generate_legal_moves(&board.inner).bitmask
@@ -1129,6 +1183,8 @@ fn _core(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
         encode_flat_features_batch_parts_py,
         module
     )?)?;
+    #[cfg(not(any(test, coverage)))]
+    module.add_function(wrap_pyfunction!(search_best_move_exact_parts_py, module)?)?;
     module.add_function(wrap_pyfunction!(validate_board, module)?)?;
     module.add_function(wrap_pyfunction!(generate_legal_moves_py, module)?)?;
     module.add_function(wrap_pyfunction!(legal_moves_list, module)?)?;

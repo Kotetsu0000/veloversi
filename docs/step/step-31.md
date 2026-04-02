@@ -83,17 +83,16 @@
 `failure_reason` は少なくとも次を取り得る。
 
 - `"timeout"`
-- `"not_eligible"` もしくはこれに相当する値
 
 ## 受け入れ条件
 
-- [ ] `Board.search_best_move_exact(timeout_seconds=1.0)` が使える
-- [ ] `RecordedBoard.search_best_move_exact(timeout_seconds=1.0)` が使える
-- [ ] module-level `search_best_move_exact(...)` が使える
-- [ ] timeout 超過時は partial result ではなく失敗結果を返す
-- [ ] timeout 未満で終わる小さな終盤局面では exact 結果が返る
-- [ ] README / examples / docstring が更新されている
-- [ ] `make check` が成功する
+- [x] `Board.search_best_move_exact(timeout_seconds=1.0)` が使える
+- [x] `RecordedBoard.search_best_move_exact(timeout_seconds=1.0)` が使える
+- [x] module-level `search_best_move_exact(...)` が使える
+- [x] timeout 超過時は partial result ではなく失敗結果を返す
+- [x] timeout 未満で終わる小さな終盤局面では exact 結果が返る
+- [x] README / examples / docstring が更新されている
+- [x] `make check` が成功する
 
 ## 実装方針
 
@@ -140,16 +139,6 @@
     - `pv = []`
     - `failure_reason = "timeout"`
 
-### exact eligibility の扱い
-
-- 懸念:
-  - 空き数が多い局面では exact solver が現実的でない
-  - Python API で panic や例外を直接見せると扱いにくい
-- 解決策:
-  - eligibility を先に確認し、対象外なら失敗結果を返す
-  - `failure_reason` には `"not_eligible"` 相当の値を入れる
-  - 既存 `SolveConfig` の `exact_solver_empty_threshold` と整合する Rust 側実装にする
-
 ### `RecordedBoard` の探索対象
 
 - 懸念:
@@ -168,3 +157,31 @@
 現在の Python 公開面には探索 API がなく、終盤の exact 探索を Python から直接使えない。
 また、既存 Rust の `search_best_move` は exact solver への切り替え機能はあるが、timeout 超過時に失敗結果を返す仕様ではない。
 終盤の最善手探索を `Board` / `RecordedBoard` の method-style API に揃えるには、この timeout 付き exact API を先に足す必要がある。
+
+## 実装結果
+
+- Rust 側に timeout 付き exact 探索 API `search_best_move_exact` を追加した
+- exact solver は alpha-beta で無駄探索を抑えつつ、deadline 超過時は `Timeout` を返す
+- Python 公開面に次を追加した
+  - `search_best_move_exact(board, timeout_seconds=1.0)`
+  - `board.search_best_move_exact(timeout_seconds=1.0)`
+  - `record.search_best_move_exact(timeout_seconds=1.0)`
+- 返り値は `dict` とし、少なくとも次を含む
+  - `success`
+  - `best_move`
+  - `exact_margin`
+  - `pv`
+  - `searched_nodes`
+  - `elapsed_seconds`
+  - `failure_reason`
+- `RecordedBoard` は `current_board` を探索対象にする
+- README と Python docstring を更新した
+
+## 検証結果
+
+- `cargo test search_best_move_exact`: 成功
+- `uv run pytest -q src/test_python_api.py -k "search_best_move_exact"`: 成功
+  - `3 passed`
+- `make check`: 成功
+  - Rust: `160 passed; 0 failed; 6 ignored`
+  - Python: `60 passed`

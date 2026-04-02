@@ -57,6 +57,17 @@ pub enum SolveError {
     NotEligible,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExactSearchFailureReason {
+    Timeout,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExactSearchFailure {
+    pub reason: ExactSearchFailureReason,
+    pub searched_nodes: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ExactLine {
     best_move: Option<Move>,
@@ -131,7 +142,33 @@ pub fn solve_exact(board: &Board, config: &SolveConfig) -> Result<SolveResult, S
     }
 
     let mut searched_nodes = 0;
-    let line = solve_exact_line(board, &mut searched_nodes);
+    let line = solve_exact_line(board, &mut searched_nodes, -SCORE_INF, SCORE_INF, None)
+        .expect("solve_exact must not time out");
+    Ok(SolveResult {
+        best_move: line.best_move,
+        exact_margin: line.exact_margin,
+        pv: line.pv,
+        searched_nodes,
+    })
+}
+
+pub fn search_best_move_exact(
+    board: &Board,
+    time_limit: Duration,
+) -> Result<SolveResult, ExactSearchFailure> {
+    let deadline = Instant::now() + time_limit;
+    let mut searched_nodes = 0;
+    let line = solve_exact_line(
+        board,
+        &mut searched_nodes,
+        -SCORE_INF,
+        SCORE_INF,
+        Some(deadline),
+    )
+    .map_err(|reason| ExactSearchFailure {
+        reason,
+        searched_nodes,
+    })?;
     Ok(SolveResult {
         best_move: line.best_move,
         exact_margin: line.exact_margin,
@@ -273,12 +310,18 @@ pub fn search_best_move(board: &Board, config: &SearchConfig) -> SearchResult {
     }
 }
 
-fn solve_exact_line(board: &Board, searched_nodes: &mut u64) -> ExactLine {
+fn solve_exact_line(
+    board: &Board,
+    searched_nodes: &mut u64,
+    mut alpha: i16,
+    beta: i16,
+    deadline: Option<Instant>,
+) -> Result<ExactLine, ExactSearchFailureReason> {
     *searched_nodes += 1;
 
     let legal = generate_legal_moves(board);
     if legal.count == 0 {
-        return match board_status(board) {
+        let line = match board_status(board) {
             BoardStatus::Terminal => ExactLine {
                 best_move: None,
                 exact_margin: final_margin_from_side_to_move(board) as i16,
@@ -286,7 +329,7 @@ fn solve_exact_line(board: &Board, searched_nodes: &mut u64) -> ExactLine {
             },
             BoardStatus::ForcedPass => {
                 let passed = apply_forced_pass(board).expect("forced pass must succeed");
-                let child = solve_exact_line(&passed, searched_nodes);
+                let child = solve_exact_line(&passed, searched_nodes, -beta, -alpha, deadline)?;
                 ExactLine {
                     best_move: None,
                     exact_margin: -child.exact_margin,
@@ -295,30 +338,45 @@ fn solve_exact_line(board: &Board, searched_nodes: &mut u64) -> ExactLine {
             }
             BoardStatus::Ongoing => unreachable!("legal.count == 0 なら ongoing にはならない"),
         };
+        return Ok(line);
+    }
+
+    if let Some(deadline) = deadline
+        && Instant::now() >= deadline
+    {
+        return Err(ExactSearchFailureReason::Timeout);
     }
 
     let mut best_move = None;
     let mut best_score = i16::MIN;
     let mut best_pv = Vec::new();
 
-    for mv in legal_moves_to_vec(legal) {
-        let next = apply_move_unchecked(board, mv);
-        let child = solve_exact_line(&next, searched_nodes);
+    for ordered in ordered_moves(board, legal, None) {
+        if let Some(deadline) = deadline
+            && Instant::now() >= deadline
+        {
+            return Err(ExactSearchFailureReason::Timeout);
+        }
+        let child = solve_exact_line(&ordered.next, searched_nodes, -beta, -alpha, deadline)?;
         let score = -child.exact_margin;
         if score > best_score {
-            best_move = Some(mv);
+            best_move = Some(ordered.mv);
             best_score = score;
             best_pv.clear();
-            best_pv.push(mv);
+            best_pv.push(ordered.mv);
             best_pv.extend(child.pv);
+        }
+        alpha = alpha.max(score);
+        if alpha >= beta {
+            break;
         }
     }
 
-    ExactLine {
+    Ok(ExactLine {
         best_move,
         exact_margin: best_score,
         pv: best_pv,
-    }
+    })
 }
 
 fn search_root(
@@ -867,12 +925,13 @@ impl SearchState {
 #[cfg(test)]
 mod tests {
     use super::{
-        BoardKey, BoundKind, CORNER_MASK, EDGE_MASK, SCORE_INF, SCORE_MAX, ScoreKind, SearchConfig,
-        SearchLine, SearchResult, SearchState, SolveConfig, SolveError, TranspositionEntry,
-        TranspositionTable, can_solve_exact, corner_closeness_penalty, deadline_from_config,
-        determine_bound, frontier_count, is_immediate_win_priority, leaf_score, mid_evaluate_diff,
-        neighbor_mask, opponent_board, ordered_moves, oriented_bits, potential_mobility,
-        search_best_move, solve_exact, update_root_candidates,
+        BoardKey, BoundKind, CORNER_MASK, EDGE_MASK, ExactSearchFailureReason, SCORE_INF,
+        SCORE_MAX, ScoreKind, SearchConfig, SearchLine, SearchResult, SearchState, SolveConfig,
+        SolveError, TranspositionEntry, TranspositionTable, can_solve_exact,
+        corner_closeness_penalty, deadline_from_config, determine_bound, frontier_count,
+        is_immediate_win_priority, leaf_score, mid_evaluate_diff, neighbor_mask, opponent_board,
+        ordered_moves, oriented_bits, potential_mobility, search_best_move, search_best_move_exact,
+        solve_exact, update_root_candidates,
     };
     use crate::engine::{
         Board, BoardStatus, Color, Move, apply_forced_pass, apply_move_unchecked, board_status,
@@ -1163,6 +1222,43 @@ mod tests {
         if let Some(first) = result.best_move {
             assert_eq!(result.pv.first().copied(), Some(first));
         }
+    }
+
+    #[test]
+    fn search_best_move_exact_matches_solve_exact_on_small_endgame() {
+        let board = apply_forced_pass(
+            &Board::from_bits(0xFFFF_FFFF_FFFF_FF7E, 0x0000_0000_0000_0080, Color::Black)
+                .expect("board must be valid"),
+        )
+        .expect("forced pass must succeed");
+        let exact = solve_exact(
+            &board,
+            &SolveConfig {
+                exact_solver_empty_threshold: 1,
+            },
+        )
+        .expect("small endgame must be exact-solvable");
+        let timed = search_best_move_exact(&board, Duration::from_secs_f64(1.0))
+            .expect("timed exact search must succeed");
+
+        assert_eq!(timed.best_move, exact.best_move);
+        assert_eq!(timed.exact_margin, exact.exact_margin);
+        assert_eq!(timed.pv, exact.pv);
+        assert!(timed.searched_nodes >= 1);
+    }
+
+    #[test]
+    fn search_best_move_exact_returns_timeout_on_large_board_with_zero_budget() {
+        let board = Board::new_initial();
+        let result = search_best_move_exact(&board, Duration::ZERO);
+
+        assert_eq!(
+            result,
+            Err(super::ExactSearchFailure {
+                reason: ExactSearchFailureReason::Timeout,
+                searched_nodes: 1,
+            })
+        );
     }
 
     #[test]
