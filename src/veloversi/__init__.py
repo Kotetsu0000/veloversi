@@ -118,6 +118,20 @@ def _validate_u32(value: object, name: str) -> int:
     return value
 
 
+def _validate_optional_positive_int(value: object, name: str) -> int | None:
+    if value is None:
+        return None
+    if type(value) is not int or value <= 0:
+        raise ValueError(f"{name} must be a positive int or None")
+    return value
+
+
+def _validate_u8(value: object, name: str) -> int:
+    if type(value) is not int or not (0 <= value <= 0xFF):
+        raise ValueError(f"{name} must be an int in 0..255")
+    return value
+
+
 def _validate_bool(value: object, name: str) -> bool:
     if type(value) is not bool:
         raise ValueError(f"{name} must be a bool")
@@ -303,17 +317,33 @@ class RecordedBoard:
         """現在局面を flat/NNUE 風 `(1, 192)` 入力に変換します。"""
         return prepare_flat_model_input(self)
 
-    def search_best_move_exact(self, timeout_seconds: float = 1.0) -> dict[str, object]:
+    def search_best_move_exact(
+        self,
+        timeout_seconds: float = 1.0,
+        *,
+        worker_count: int | None = None,
+        serial_fallback_empty_threshold: int = 18,
+        shared_tt_empty_threshold: int = 20,
+    ) -> dict[str, object]:
         """現在局面を全探索し、最善手を返します。
 
         Args:
             timeout_seconds: 探索の制限時間。既定値は `1.0` 秒です。
+            worker_count: 並列 worker 数。`None` の場合は自動設定です。
+            serial_fallback_empty_threshold: この空き数未満では serial fallback を使います。
+            shared_tt_empty_threshold: この空き数以上で shared TT を使います。
 
         Notes:
             `RecordedBoard` では `current_board` を探索対象にします。
             timeout を超えた場合は partial result ではなく失敗結果を返します。
         """
-        return search_best_move_exact(self, timeout_seconds)
+        return search_best_move_exact(
+            self,
+            timeout_seconds,
+            worker_count=worker_count,
+            serial_fallback_empty_threshold=serial_fallback_empty_threshold,
+            shared_tt_empty_threshold=shared_tt_empty_threshold,
+        )
 
     def to_dict(self) -> dict[str, object]:
         """Return the in-progress recording as a plain dict.
@@ -724,12 +754,25 @@ def _board_prepare_flat_model_input(self: Board) -> np.ndarray:
     return prepare_flat_model_input(self)
 
 
-def _board_search_best_move_exact(self: Board, timeout_seconds: float = 1.0) -> dict[str, object]:
+def _board_search_best_move_exact(
+    self: Board,
+    timeout_seconds: float = 1.0,
+    *,
+    worker_count: int | None = None,
+    serial_fallback_empty_threshold: int = 18,
+    shared_tt_empty_threshold: int = 20,
+) -> dict[str, object]:
     """盤面を全探索し、最善手を返します。
 
     timeout を超えた場合は partial result ではなく失敗結果を返します。
     """
-    return search_best_move_exact(self, timeout_seconds)
+    return search_best_move_exact(
+        self,
+        timeout_seconds,
+        worker_count=worker_count,
+        serial_fallback_empty_threshold=serial_fallback_empty_threshold,
+        shared_tt_empty_threshold=shared_tt_empty_threshold,
+    )
 
 
 Board.apply_move = _board_apply_move  # type: ignore[attr-defined]
@@ -950,13 +993,21 @@ def prepare_flat_model_input_batch(values: list[object]) -> np.ndarray:
 
 
 def search_best_move_exact(
-    board_or_record: object, timeout_seconds: float = 1.0
+    board_or_record: object,
+    timeout_seconds: float = 1.0,
+    *,
+    worker_count: int | None = None,
+    serial_fallback_empty_threshold: int = 18,
+    shared_tt_empty_threshold: int = 20,
 ) -> dict[str, object]:
     """全探索で最善手を探します。
 
     Args:
         board_or_record: `Board` または `RecordedBoard`。
         timeout_seconds: 探索の制限時間。既定値は `1.0` 秒です。
+        worker_count: 並列 worker 数。`None` の場合は自動設定です。
+        serial_fallback_empty_threshold: この空き数未満では serial fallback を使います。
+        shared_tt_empty_threshold: この空き数以上で shared TT を使います。
 
     Returns:
         次のキーを持つ dict。
@@ -974,11 +1025,24 @@ def search_best_move_exact(
     timeout_value = float(timeout_seconds)
     if timeout_value < 0.0:
         raise ValueError("timeout_seconds must be a finite float >= 0.0")
+    worker_count_value = _validate_optional_positive_int(worker_count, "worker_count")
+    serial_threshold = _validate_u8(
+        serial_fallback_empty_threshold, "serial_fallback_empty_threshold"
+    )
+    shared_threshold = _validate_u8(shared_tt_empty_threshold, "shared_tt_empty_threshold")
+    if shared_threshold < serial_threshold:
+        raise ValueError("shared_tt_empty_threshold must be >= serial_fallback_empty_threshold")
 
     board = _board_from_board_or_record(board_or_record)
     start = time.perf_counter()
     success, best_move, exact_margin, pv, searched_nodes, failure_reason = (
-        _search_best_move_exact_parts(board, timeout_value)
+        _search_best_move_exact_parts(
+            board,
+            timeout_value,
+            worker_count_value,
+            serial_threshold,
+            shared_threshold,
+        )
     )
     elapsed_seconds = time.perf_counter() - start
     return {

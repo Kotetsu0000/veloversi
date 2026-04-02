@@ -52,6 +52,14 @@ pub struct SolveConfig {
     pub exact_solver_empty_threshold: u8,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExactSearchConfig {
+    pub time_limit: Duration,
+    pub worker_count: Option<usize>,
+    pub serial_fallback_empty_threshold: u8,
+    pub shared_tt_empty_threshold: u8,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SolveResult {
     pub best_move: Option<Move>,
@@ -74,6 +82,17 @@ pub enum ExactSearchFailureReason {
 pub struct ExactSearchFailure {
     pub reason: ExactSearchFailureReason,
     pub searched_nodes: u64,
+}
+
+impl Default for ExactSearchConfig {
+    fn default() -> Self {
+        Self {
+            time_limit: Duration::from_secs_f64(1.0),
+            worker_count: None,
+            serial_fallback_empty_threshold: 18,
+            shared_tt_empty_threshold: 20,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -175,8 +194,21 @@ pub fn search_best_move_exact(
     board: &Board,
     time_limit: Duration,
 ) -> Result<SolveResult, ExactSearchFailure> {
-    let deadline = Instant::now() + time_limit;
-    exact_search_best_move_parallel(board, deadline).map_err(|reason| ExactSearchFailure {
+    search_best_move_exact_with_config(
+        board,
+        &ExactSearchConfig {
+            time_limit,
+            ..ExactSearchConfig::default()
+        },
+    )
+}
+
+pub fn search_best_move_exact_with_config(
+    board: &Board,
+    config: &ExactSearchConfig,
+) -> Result<SolveResult, ExactSearchFailure> {
+    let deadline = Instant::now() + config.time_limit;
+    exact_search_best_move_parallel(board, deadline, config).map_err(|reason| ExactSearchFailure {
         reason: ExactSearchFailureReason::Timeout,
         searched_nodes: reason,
     })
@@ -428,7 +460,11 @@ fn solve_exact_line(
     Ok(line)
 }
 
-fn exact_search_best_move_parallel(board: &Board, deadline: Instant) -> Result<SolveResult, u64> {
+fn exact_search_best_move_parallel(
+    board: &Board,
+    deadline: Instant,
+    config: &ExactSearchConfig,
+) -> Result<SolveResult, u64> {
     let legal = generate_legal_moves(board);
     if legal.count == 0 {
         let mut state = ExactSearchState::new(Some(deadline));
@@ -444,10 +480,20 @@ fn exact_search_best_move_parallel(board: &Board, deadline: Instant) -> Result<S
 
     let ordered = ordered_moves(board, legal, None);
     let empty = disc_count(board).empty;
-    let parallelism = thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
-    if parallelism <= 1 || ordered.len() <= 1 || empty < 18 || ordered.len() < 4 {
+    let parallelism = config.worker_count.unwrap_or_else(|| {
+        thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+    });
+    let serial_fallback_threshold = config.serial_fallback_empty_threshold;
+    let shared_tt_threshold = config
+        .shared_tt_empty_threshold
+        .max(serial_fallback_threshold);
+    if parallelism <= 1
+        || ordered.len() <= 1
+        || empty < serial_fallback_threshold
+        || ordered.len() < 4
+    {
         let mut state = ExactSearchState::new(Some(deadline));
         let line = solve_exact_line(board, -SCORE_INF, SCORE_INF, &mut state)
             .map_err(|_| state.searched_nodes)?;
@@ -459,7 +505,7 @@ fn exact_search_best_move_parallel(board: &Board, deadline: Instant) -> Result<S
         });
     }
 
-    if empty < 20 {
+    if empty < shared_tt_threshold {
         return exact_search_best_move_parallel_unshared(&ordered, deadline);
     }
 
@@ -1321,13 +1367,14 @@ impl ExactSearchState {
 #[cfg(test)]
 mod tests {
     use super::{
-        BoardKey, BoundKind, CORNER_MASK, EDGE_MASK, ExactSearchFailureReason, ExactSearchState,
-        SCORE_INF, SCORE_MAX, ScoreKind, SearchConfig, SearchLine, SearchResult, SearchState,
-        SolveConfig, SolveError, TranspositionEntry, TranspositionTable, can_solve_exact,
-        corner_closeness_penalty, deadline_from_config, determine_bound, frontier_count,
-        is_immediate_win_priority, leaf_score, mid_evaluate_diff, neighbor_mask, opponent_board,
-        ordered_moves, oriented_bits, potential_mobility, search_best_move, search_best_move_exact,
-        solve_exact, solve_exact_line, update_root_candidates,
+        BoardKey, BoundKind, CORNER_MASK, EDGE_MASK, ExactSearchConfig, ExactSearchFailureReason,
+        ExactSearchState, SCORE_INF, SCORE_MAX, ScoreKind, SearchConfig, SearchLine, SearchResult,
+        SearchState, SolveConfig, SolveError, TranspositionEntry, TranspositionTable,
+        can_solve_exact, corner_closeness_penalty, deadline_from_config, determine_bound,
+        frontier_count, is_immediate_win_priority, leaf_score, mid_evaluate_diff, neighbor_mask,
+        opponent_board, ordered_moves, oriented_bits, potential_mobility, search_best_move,
+        search_best_move_exact, search_best_move_exact_with_config, solve_exact, solve_exact_line,
+        update_root_candidates,
     };
     use crate::engine::{
         Board, BoardStatus, Color, Move, apply_forced_pass, apply_move_unchecked, board_status,
@@ -1341,6 +1388,35 @@ mod tests {
     fn bit(square: u8) -> u64 {
         1u64 << square
     }
+
+    #[derive(Clone, Copy)]
+    struct ExactBenchmarkCase {
+        name: &'static str,
+        empty: u8,
+        min_legal_count: u8,
+        timeout: Duration,
+    }
+
+    const EXACT_PARALLEL_BENCH_CASES: &[ExactBenchmarkCase] = &[
+        ExactBenchmarkCase {
+            name: "empty16",
+            empty: 16,
+            min_legal_count: 4,
+            timeout: Duration::from_secs(60),
+        },
+        ExactBenchmarkCase {
+            name: "empty18",
+            empty: 18,
+            min_legal_count: 4,
+            timeout: Duration::from_secs(60),
+        },
+        ExactBenchmarkCase {
+            name: "empty20",
+            empty: 20,
+            min_legal_count: 4,
+            timeout: Duration::from_secs(60),
+        },
+    ];
 
     fn manual_neighbor_mask(bits: u64) -> u64 {
         let mut result = 0u64;
@@ -1543,6 +1619,10 @@ mod tests {
         panic!(
             "endgame board not found for target_empty={target_empty} min_legal_count={min_legal_count}"
         );
+    }
+
+    fn benchmark_case_board(case: ExactBenchmarkCase) -> Board {
+        pick_exact_empty_endgame_board(case.empty, case.min_legal_count)
     }
 
     fn step32_parallel_exact_search_best_move(
@@ -1819,6 +1899,26 @@ mod tests {
     }
 
     #[test]
+    fn search_best_move_exact_with_config_respects_worker_count_and_thresholds() {
+        let board = pick_multi_move_endgame_board();
+        let config = ExactSearchConfig {
+            time_limit: Duration::from_secs_f64(1.0),
+            worker_count: Some(1),
+            serial_fallback_empty_threshold: 6,
+            shared_tt_empty_threshold: 8,
+        };
+
+        let configured = search_best_move_exact_with_config(&board, &config)
+            .expect("configured exact search must succeed");
+        let defaulted = search_best_move_exact(&board, Duration::from_secs_f64(1.0))
+            .expect("default exact search must succeed");
+
+        assert_eq!(configured.best_move, defaulted.best_move);
+        assert_eq!(configured.exact_margin, defaulted.exact_margin);
+        assert_eq!(configured.pv, defaulted.pv);
+    }
+
+    #[test]
     #[ignore = "benchmark helper"]
     fn exact_search_bench_multi_move_endgame() {
         let board = pick_multi_move_endgame_board();
@@ -2039,6 +2139,53 @@ mod tests {
             "exact bench step32-vs-step33 empty20: step32={:?} step33={:?} step32_nodes={} step33_nodes={}",
             step32_elapsed, step33_elapsed, step32.searched_nodes, step33.searched_nodes
         );
+    }
+
+    #[test]
+    #[ignore = "benchmark helper"]
+    fn exact_search_bench_step34_configurations() {
+        for case in EXACT_PARALLEL_BENCH_CASES {
+            let board = benchmark_case_board(*case);
+
+            let serial_start = Instant::now();
+            let serial = solve_exact(
+                &board,
+                &SolveConfig {
+                    exact_solver_empty_threshold: case.empty,
+                },
+            )
+            .expect("benchmark board must be exact-solvable");
+            let serial_elapsed = serial_start.elapsed();
+
+            let default_start = Instant::now();
+            let default_result = search_best_move_exact(&board, case.timeout)
+                .expect("default exact benchmark must finish");
+            let default_elapsed = default_start.elapsed();
+
+            let single_worker_start = Instant::now();
+            let single_worker_result = search_best_move_exact_with_config(
+                &board,
+                &ExactSearchConfig {
+                    time_limit: case.timeout,
+                    worker_count: Some(1),
+                    serial_fallback_empty_threshold: 18,
+                    shared_tt_empty_threshold: 20,
+                },
+            )
+            .expect("single-worker exact benchmark must finish");
+            let single_worker_elapsed = single_worker_start.elapsed();
+
+            eprintln!(
+                "exact bench step34 {}: serial={:?} default={:?} worker1={:?} serial_nodes={} default_nodes={} worker1_nodes={}",
+                case.name,
+                serial_elapsed,
+                default_elapsed,
+                single_worker_elapsed,
+                serial.searched_nodes,
+                default_result.searched_nodes,
+                single_worker_result.searched_nodes,
+            );
+        }
     }
 
     #[test]

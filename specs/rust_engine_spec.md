@@ -864,6 +864,53 @@ pub fn can_solve_exact(board: &Board, config: &SolveConfig) -> bool
 - Python は後続 step で公開
 - WASM 非公開
 
+### 6.6 timeout 付き exact 探索
+
+```rust
+pub struct ExactSearchConfig {
+    pub time_limit: Duration,
+    pub worker_count: Option<usize>,
+    pub serial_fallback_empty_threshold: u8,
+    pub shared_tt_empty_threshold: u8,
+}
+
+pub enum ExactSearchFailureReason {
+    Timeout,
+}
+
+pub struct ExactSearchFailure {
+    pub reason: ExactSearchFailureReason,
+    pub searched_nodes: u64,
+}
+```
+
+説明:
+- `search_best_move_exact` は timeout 付きの公開 exact 探索 API とする
+- timeout 超過時は partial result を返さず、`ExactSearchFailure` を返す
+- `worker_count`
+  - `None` の場合は実行環境の並列度に基づく既定値を使う
+- `serial_fallback_empty_threshold`
+  - この空き数未満では serial fallback を使う
+- `shared_tt_empty_threshold`
+  - この空き数以上で shared TT を使う
+
+```rust
+pub fn search_best_move_exact(
+    board: &Board,
+    time_limit: Duration,
+) -> Result<SolveResult, ExactSearchFailure>
+
+pub fn search_best_move_exact_with_config(
+    board: &Board,
+    config: &ExactSearchConfig,
+) -> Result<SolveResult, ExactSearchFailure>
+```
+
+説明:
+- `search_best_move_exact` は既定設定を使う簡易入口
+- `search_best_move_exact_with_config` は worker 数と閾値を含む exact 設定を受け取る
+- `SolveResult` の意味は `solve_exact` と同じで、`exact_margin` は現在手番視点の厳密石差とする
+
 ## 7. Python 公開 API 仕様
 
 PyO3 モジュール名は `veloversi._core` とする。

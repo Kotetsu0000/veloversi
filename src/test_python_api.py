@@ -581,8 +581,15 @@ def test_search_best_move_exact_succeeds_on_small_endgame_for_board_and_record()
     result = search_best_move_exact(board, 1.0)
     board_method = board.search_best_move_exact(1.0)
     record_method = record.search_best_move_exact(1.0)
+    configured = search_best_move_exact(
+        board,
+        1.0,
+        worker_count=1,
+        serial_fallback_empty_threshold=1,
+        shared_tt_empty_threshold=1,
+    )
 
-    for candidate in (result, board_method, record_method):
+    for candidate in (result, board_method, record_method, configured):
         assert candidate["success"] is True
         assert candidate["best_move"] == 0
         assert candidate["exact_margin"] == -48
@@ -609,6 +616,25 @@ def test_search_best_move_exact_rejects_invalid_timeout() -> None:
 
     with pytest.raises(ValueError, match="timeout_seconds"):
         search_best_move_exact(initial_board(), float("nan"))
+
+
+def test_search_best_move_exact_rejects_invalid_parallel_settings() -> None:
+    with pytest.raises(ValueError, match="worker_count"):
+        search_best_move_exact(initial_board(), 1.0, worker_count=0)
+
+    with pytest.raises(ValueError, match="serial_fallback_empty_threshold"):
+        search_best_move_exact(initial_board(), 1.0, serial_fallback_empty_threshold=-1)
+
+    with pytest.raises(ValueError, match="shared_tt_empty_threshold"):
+        search_best_move_exact(initial_board(), 1.0, shared_tt_empty_threshold=256)
+
+    with pytest.raises(ValueError, match="shared_tt_empty_threshold must be >="):
+        search_best_move_exact(
+            initial_board(),
+            1.0,
+            serial_fallback_empty_threshold=20,
+            shared_tt_empty_threshold=18,
+        )
 
 
 def test_finish_game_recording_requires_terminal_board() -> None:

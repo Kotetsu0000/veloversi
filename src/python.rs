@@ -12,7 +12,7 @@ use crate::{
     is_legal_move, legal_moves_to_vec, transform_board, transform_square,
 };
 #[cfg(not(any(test, coverage)))]
-use crate::{ExactSearchFailureReason, SolveResult};
+use crate::{ExactSearchConfig, ExactSearchFailureReason, SolveResult};
 #[cfg(not(any(test, coverage)))]
 use crate::{
     FeatureConfig, FeaturePerspective, Move, PackedBoard, PackedSupervisedExample, RandomGameTrace,
@@ -21,8 +21,8 @@ use crate::{
     load_game_records, pack_board, packed_supervised_examples_from_trace,
     packed_supervised_examples_from_traces, play_random_game, prepare_flat_learning_batch,
     prepare_planes_learning_batch, random_start_board, record_move, record_pass,
-    sample_reachable_positions, search_best_move_exact, start_game_recording,
-    supervised_examples_from_trace, supervised_examples_from_traces, unpack_board,
+    sample_reachable_positions, start_game_recording, supervised_examples_from_trace,
+    supervised_examples_from_traces, unpack_board,
 };
 
 #[pyclass(name = "Board")]
@@ -1003,6 +1003,9 @@ fn encode_flat_features_batch_parts_py<'py>(
 fn search_best_move_exact_parts_py(
     board: &PyBoard,
     timeout_seconds: f64,
+    worker_count: Option<usize>,
+    serial_fallback_empty_threshold: u8,
+    shared_tt_empty_threshold: u8,
 ) -> PyResult<PyExactSearchParts> {
     if !timeout_seconds.is_finite() || timeout_seconds < 0.0 {
         return Err(pyo3::exceptions::PyValueError::new_err(
@@ -1010,8 +1013,13 @@ fn search_best_move_exact_parts_py(
         ));
     }
 
-    let duration = Duration::from_secs_f64(timeout_seconds);
-    match search_best_move_exact(&board.inner, duration) {
+    let config = ExactSearchConfig {
+        time_limit: Duration::from_secs_f64(timeout_seconds),
+        worker_count,
+        serial_fallback_empty_threshold,
+        shared_tt_empty_threshold,
+    };
+    match crate::search_best_move_exact_with_config(&board.inner, &config) {
         Ok(result) => Ok(solve_result_to_py_parts(result)),
         Err(err) => Ok((
             false,
