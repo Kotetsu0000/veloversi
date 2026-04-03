@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import numpy as np
@@ -46,6 +47,7 @@ from veloversi import (
     prepare_flat_model_input_batch,
     prepare_planes_learning_batch,
     sample_reachable_positions,
+    select_move_with_model,
     supervised_examples_from_trace,
     supervised_examples_from_traces,
     transform_board,
@@ -53,6 +55,97 @@ from veloversi import (
     unpack_board,
     validate_board,
 )
+
+
+class _FakeTensor:
+    def __init__(self, array: object) -> None:
+        self._array = np.asarray(array, dtype=np.float32)
+        self.device = "cpu"
+
+    def to(self, device: str) -> "_FakeTensor":
+        self.device = device
+        return self
+
+    def detach(self) -> "_FakeTensor":
+        return self
+
+    def cpu(self) -> "_FakeTensor":
+        return self
+
+    def numpy(self) -> np.ndarray:
+        return np.asarray(self._array, dtype=np.float32)
+
+
+class _FakeNoGrad:
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+        return False
+
+
+class _FakeModule:
+    def __init__(self) -> None:
+        self.training = True
+
+    def eval(self) -> "_FakeModule":
+        self.training = False
+        return self
+
+    def train(self, mode: bool = True) -> "_FakeModule":
+        self.training = mode
+        return self
+
+    def __call__(self, tensor: _FakeTensor) -> _FakeTensor:
+        return self.forward(tensor)
+
+    def forward(self, tensor: _FakeTensor) -> _FakeTensor:
+        raise NotImplementedError
+
+
+class _CnnPolicyModel(_FakeModule):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    def forward(self, tensor: _FakeTensor) -> _FakeTensor:
+        self.calls += 1
+        array = tensor.numpy()
+        if array.shape != (1, 3, 8, 8):
+            raise ValueError(f"unexpected cnn shape: {array.shape}")
+        legal = array[0, 2].reshape(64)
+        weights = np.arange(64, dtype=np.float32)
+        logits = legal * weights
+        return _FakeTensor(logits.reshape(1, 64))
+
+
+class _FlatValueModel(_FakeModule):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    def forward(self, tensor: _FakeTensor) -> _FakeTensor:
+        self.calls += 1
+        array = tensor.numpy()
+        if array.shape != (1, 192):
+            raise ValueError(f"unexpected flat shape: {array.shape}")
+        opp = array[0, 64:128]
+        weights = np.arange(64, dtype=np.float32)
+        score = -float(np.dot(opp, weights) / max(np.sum(opp), 1.0) / 63.0)
+        return _FakeTensor(np.asarray([score], dtype=np.float32))
+
+
+class _AmbiguousModel(_FakeModule):
+    def forward(self, tensor: _FakeTensor) -> _FakeTensor:
+        return _FakeTensor(np.asarray([0.0], dtype=np.float32))
+
+
+def _fake_torch_module() -> object:
+    return SimpleNamespace(
+        nn=SimpleNamespace(Module=_FakeModule),
+        from_numpy=lambda array: _FakeTensor(array),
+        no_grad=lambda: _FakeNoGrad(),
+    )
 
 
 def test_board_round_trip_and_validate() -> None:
@@ -635,6 +728,133 @@ def test_search_best_move_exact_rejects_invalid_parallel_settings() -> None:
             serial_fallback_empty_threshold=20,
             shared_tt_empty_threshold=18,
         )
+
+
+def test_select_move_with_model_requires_torch(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _raise_missing_torch() -> object:
+        raise RuntimeError("select_move_with_model を使うには PyTorch (`torch`) の導入が必要です")
+
+    monkeypatch.setattr(veloversi, "_import_torch", _raise_missing_torch)
+
+    with pytest.raises(RuntimeError, match="PyTorch"):
+        select_move_with_model(initial_board(), object())
+
+
+def test_select_move_with_model_policy_cnn_supports_board_and_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(veloversi, "_import_torch", _fake_torch_module)
+    model = _CnnPolicyModel()
+    board = initial_board()
+    record = start_game_recording(board)
+
+    board_result = board.select_move_with_model(model, policy_mode="best")
+    record_result = record.select_move_with_model(model, policy_mode="best")
+
+    for candidate in (board_result, record_result):
+        assert candidate["success"] is True
+        assert candidate["best_move"] == 44
+        assert candidate["input_format"] == "cnn"
+        assert candidate["output_format"] == "policy"
+        assert candidate["source"] == "policy"
+        assert candidate["forced_pass"] is False
+        assert candidate["timeout_reached"] is False
+        assert cast(np.ndarray, candidate["policy"]).shape == (64,)
+        assert cast(float, candidate["selected_probability"]) > 0.0
+
+
+def test_select_move_with_model_policy_sample_uses_probability_distribution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(veloversi, "_import_torch", _fake_torch_module)
+    monkeypatch.setattr(
+        np.random,
+        "default_rng",
+        lambda: SimpleNamespace(choice=lambda length, p: 0),
+    )
+    model = _CnnPolicyModel()
+
+    result = select_move_with_model(initial_board(), model, policy_mode="sample")
+
+    assert result["success"] is True
+    assert result["best_move"] == 19
+    assert result["output_format"] == "policy"
+    assert result["source"] == "policy"
+
+
+def test_select_move_with_model_value_flat_search_and_partial_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(veloversi, "_import_torch", _fake_torch_module)
+    model = _FlatValueModel()
+
+    result = select_move_with_model(initial_board(), model, depth=1)
+
+    assert result["success"] is True
+    assert result["best_move"] == 44
+    assert result["input_format"] == "flat"
+    assert result["output_format"] == "value"
+    assert result["source"] == "value_search"
+    assert result["timeout_reached"] is False
+    assert cast(float, result["value"]) > 0.0
+    assert cast(int, result["searched_nodes"]) >= 4
+    assert model.training is True
+
+    ticks = iter(np.arange(0.0, 4.0, 0.2).tolist())
+    monkeypatch.setattr("veloversi.time.perf_counter", lambda: float(next(ticks)))
+    timeout_result = select_move_with_model(initial_board(), model, depth=1, timeout_seconds=1.0)
+
+    assert timeout_result["success"] is True
+    assert timeout_result["timeout_reached"] is True
+    assert timeout_result["best_move"] in {19, 26}
+    assert timeout_result["source"] == "value_search"
+
+
+def test_select_move_with_model_uses_exact_fallback_without_model_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(veloversi, "_import_torch", _fake_torch_module)
+    board = board_from_bits(0xFFFF_FFFF_FFFF_FF7E, 0x0000_0000_0000_0080, "white")
+    model = _CnnPolicyModel()
+
+    result = select_move_with_model(
+        board,
+        model,
+        exact_from_empty_threshold=10,
+        exact_timeout_seconds=1.0,
+    )
+
+    assert result["success"] is True
+    assert result["best_move"] == 0
+    assert result["source"] == "exact"
+    assert result["exact_margin"] == -48
+    assert result["value"] == pytest.approx(-48.0 / 64.0)
+    assert model.calls == 0
+
+
+def test_select_move_with_model_handles_forced_pass_without_model_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(veloversi, "_import_torch", _fake_torch_module)
+    board = board_from_bits(0xFFFF_FFFF_FFFF_FF7E, 0x0000_0000_0000_0080, "black")
+    model = _CnnPolicyModel()
+
+    result = select_move_with_model(board, model)
+
+    assert result["success"] is True
+    assert result["best_move"] is None
+    assert result["forced_pass"] is True
+    assert result["source"] == "forced_pass"
+    assert model.calls == 0
+
+
+def test_select_move_with_model_rejects_ambiguous_input_format(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(veloversi, "_import_torch", _fake_torch_module)
+
+    with pytest.raises(ValueError, match="ambiguous"):
+        select_move_with_model(initial_board(), _AmbiguousModel())
 
 
 def test_finish_game_recording_requires_terminal_board() -> None:

@@ -136,6 +136,7 @@ packed supervised example には、少なくとも次が含まれます。
 - `board.prepare_cnn_model_input()`
 - `board.prepare_flat_model_input()`
 - `board.search_best_move_exact(timeout_seconds=1.0, worker_count=None, serial_fallback_empty_threshold=18, shared_tt_empty_threshold=20)`
+- `board.select_move_with_model(model, depth=1, timeout_seconds=1.0, policy_mode="best", device="cpu", exact_from_empty_threshold=16, exact_timeout_seconds=None)`
 
 汎用 feature API:
 
@@ -202,6 +203,7 @@ recording API:
 - `RecordedBoard.prepare_cnn_model_input`
 - `RecordedBoard.prepare_flat_model_input`
 - `RecordedBoard.search_best_move_exact`
+- `RecordedBoard.select_move_with_model`
 - `RecordedBoard.to_dict`
 - `RecordedBoard.finish`
 - `RecordedBoard.save_record`
@@ -235,6 +237,48 @@ else:
 ```
 
 `RecordedBoard.search_best_move_exact(...)` も同様に使えます。探索対象は常に `current_board` です。
+
+PyTorch model を使って着手を選びたい場合:
+
+```python
+import torch
+import veloversi as vv
+
+model = ...  # torch.nn.Module
+board = vv.initial_board()
+
+result = board.select_move_with_model(
+    model,
+    depth=1,
+    timeout_seconds=1.0,
+    policy_mode="best",
+    device="cpu",
+    exact_from_empty_threshold=16,
+)
+
+if result["success"]:
+    print(result["best_move"], result["source"])
+else:
+    print(result["failure_reason"])
+```
+
+この API は PyTorch を package dependency には含めません。`torch` が導入されている環境でのみ使えます。
+
+`select_move_with_model(...)` の挙動:
+
+- model は `torch.nn.Module` を受けます
+- 入力形式は自動判別します
+  - CNN: `(1, 3, 8, 8)`
+  - flat: `(1, 192)`
+- 出力形式も自動判別します
+  - policy: `(64,)` または `(1, 64)`
+  - value: scalar / `(1,)` / `(1, 1)`
+- `policy_mode="best"`
+  - 合法手の最大値を返します
+- `policy_mode="sample"`
+  - 合法手上の確率分布からサンプリングします
+- 強制パス局面では model を呼ばず、着手なし結果を返します
+- `exact_from_empty_threshold` 以下の終盤では `search_best_move_exact(...)` を優先します
 
 exact 探索の設定:
 

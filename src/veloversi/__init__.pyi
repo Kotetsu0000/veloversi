@@ -45,6 +45,17 @@ class RecordedBoard:
         serial_fallback_empty_threshold: int = 18,
         shared_tt_empty_threshold: int = 20,
     ) -> dict[str, object]: ...
+    def select_move_with_model(
+        self,
+        model: object,
+        depth: int = 1,
+        timeout_seconds: float = 1.0,
+        *,
+        policy_mode: str = "best",
+        device: str = "cpu",
+        exact_from_empty_threshold: int | None = 16,
+        exact_timeout_seconds: float | None = None,
+    ) -> dict[str, object]: ...
     def to_dict(self) -> dict[str, object]: ...
     def finish(self) -> dict[str, object]: ...
     def save_record(self, path: str) -> None: ...
@@ -107,6 +118,17 @@ def search_best_move_exact(
     worker_count: int | None = None,
     serial_fallback_empty_threshold: int = 18,
     shared_tt_empty_threshold: int = 20,
+) -> dict[str, object]: ...
+def select_move_with_model(
+    board_or_record: Board | RecordedBoard,
+    model: object,
+    depth: int = 1,
+    timeout_seconds: float = 1.0,
+    *,
+    policy_mode: str = "best",
+    device: str = "cpu",
+    exact_from_empty_threshold: int | None = 16,
+    exact_timeout_seconds: float | None = None,
 ) -> dict[str, object]: ...
 def encode_planes(board: Board, history: list[Board], config: dict) -> np.ndarray: ...
 def encode_planes_batch(

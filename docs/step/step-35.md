@@ -121,17 +121,17 @@
 
 ## 受け入れ条件
 
-- [ ] module-level `select_move_with_model(...)` が使える
-- [ ] `Board.select_move_with_model(...)` が使える
-- [ ] `RecordedBoard.select_move_with_model(...)` が使える
-- [ ] `torch` 非導入環境では分かりやすい error を返す
-- [ ] CNN / flat の入力形式を自動判別できる
-- [ ] policy / value の出力形式を自動判別できる
-- [ ] `policy_mode="best"` と `policy_mode="sample"` の両方が動く
-- [ ] value 出力時に `depth` と `timeout_seconds` が効く
-- [ ] `exact_from_empty_threshold` 以下で exact 探索へ切り替えられる
-- [ ] README / docstring / 型 stub が更新されている
-- [ ] `make check` が成功する
+- [x] module-level `select_move_with_model(...)` が使える
+- [x] `Board.select_move_with_model(...)` が使える
+- [x] `RecordedBoard.select_move_with_model(...)` が使える
+- [x] `torch` 非導入環境では分かりやすい error を返す
+- [x] CNN / flat の入力形式を自動判別できる
+- [x] policy / value の出力形式を自動判別できる
+- [x] `policy_mode="best"` と `policy_mode="sample"` の両方が動く
+- [x] value 出力時に `depth` と `timeout_seconds` が効く
+- [x] `exact_from_empty_threshold` 以下で exact 探索へ切り替えられる
+- [x] README / docstring / 型 stub が更新されている
+- [x] `make check` が成功する
 
 ## 実装方針
 
@@ -221,6 +221,33 @@
   - 切り替え条件は手数ではなく空きマス数にする
   - `exact_from_empty_threshold` を公開引数にする
   - timeout は `exact_timeout_seconds` で別指定できるようにする
+
+## 実装結果
+
+- Python 公開 API に `select_move_with_model(...)` を追加した
+- `Board.select_move_with_model(...)` と `RecordedBoard.select_move_with_model(...)` を追加した
+- `torch` は API 内でのみ遅延 import し、未導入環境では明確な error を返すようにした
+- 入力形式は root 盤面に対して試行し、CNN / flat のどちらか 1 つに確定する実装にした
+  - 両方通る model は曖昧として error にする
+- 出力形式は shape ベースで policy / value を判別する
+  - policy: `(64,)` / `(1, 64)`
+  - value: scalar / `(1,)` / `(1, 1)`
+- policy 出力では合法手だけを対象にし、既に確率分布ならそのまま、そうでなければ softmax を適用する
+- value 出力では Python 側の depth-limited negamax で探索し、timeout 時はその時点の最善手を返す
+- 空き数が `exact_from_empty_threshold` 以下なら、まず `search_best_move_exact(...)` を試みる
+  - exact 成功時は exact 結果を返す
+  - exact timeout 時は、残り時間があれば model 探索へフォールバックする
+- 強制パス局面では model を呼ばず、着手なし成功結果を返す
+- `model.eval()` は一時的に有効化し、終了後に元の training 状態へ戻す
+- `torch.no_grad()` で推論する
+
+## 検証結果
+
+- `uv run pytest -q src/test_python_api.py -k "select_move_with_model or search_best_move_exact"`: 成功
+  - `11 passed`
+- `make check`: 成功
+  - Rust: `161 passed; 0 failed; 14 ignored`
+  - Python: `68 passed`
 
 ### `RecordedBoard` の探索対象
 

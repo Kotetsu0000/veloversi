@@ -1,7 +1,8 @@
 from bisect import bisect_right
+import importlib
 from pathlib import Path
 import time
-from typing import cast, overload
+from typing import Any, cast, overload
 
 import numpy as np
 
@@ -95,6 +96,7 @@ __all__ = [
     "transform_board",
     "transform_square",
     "search_best_move_exact",
+    "select_move_with_model",
 ]
 
 
@@ -343,6 +345,45 @@ class RecordedBoard:
             worker_count=worker_count,
             serial_fallback_empty_threshold=serial_fallback_empty_threshold,
             shared_tt_empty_threshold=shared_tt_empty_threshold,
+        )
+
+    def select_move_with_model(
+        self,
+        model: object,
+        depth: int = 1,
+        timeout_seconds: float = 1.0,
+        *,
+        policy_mode: str = "best",
+        device: str = "cpu",
+        exact_from_empty_threshold: int | None = 16,
+        exact_timeout_seconds: float | None = None,
+    ) -> dict[str, object]:
+        """PyTorch model を使って現在局面の着手を選びます。
+
+        Args:
+            model: PyTorch `nn.Module`。
+            depth: value 出力時の探索深さ。既定値は `1`。
+            timeout_seconds: 探索全体の制限時間。
+            policy_mode: `"best"` または `"sample"`。
+            device: 推論に使う device。既定値は `"cpu"`。
+            exact_from_empty_threshold:
+                空き数がこの値以下なら exact 探索を優先します。
+                `None` の場合は exact へ切り替えません。
+            exact_timeout_seconds:
+                exact 探索に使う制限時間。`None` の場合は `timeout_seconds` を使います。
+
+        Notes:
+            `RecordedBoard` では常に `current_board` を対象にします。
+        """
+        return select_move_with_model(
+            self,
+            model,
+            depth,
+            timeout_seconds,
+            policy_mode=policy_mode,
+            device=device,
+            exact_from_empty_threshold=exact_from_empty_threshold,
+            exact_timeout_seconds=exact_timeout_seconds,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -775,6 +816,30 @@ def _board_search_best_move_exact(
     )
 
 
+def _board_select_move_with_model(
+    self: Board,
+    model: object,
+    depth: int = 1,
+    timeout_seconds: float = 1.0,
+    *,
+    policy_mode: str = "best",
+    device: str = "cpu",
+    exact_from_empty_threshold: int | None = 16,
+    exact_timeout_seconds: float | None = None,
+) -> dict[str, object]:
+    """PyTorch model を使って盤面の着手を選びます。"""
+    return select_move_with_model(
+        self,
+        model,
+        depth,
+        timeout_seconds,
+        policy_mode=policy_mode,
+        device=device,
+        exact_from_empty_threshold=exact_from_empty_threshold,
+        exact_timeout_seconds=exact_timeout_seconds,
+    )
+
+
 Board.apply_move = _board_apply_move  # type: ignore[attr-defined]
 Board.apply_forced_pass = _board_apply_forced_pass  # type: ignore[attr-defined]
 Board.generate_legal_moves = _board_generate_legal_moves  # type: ignore[attr-defined]
@@ -790,6 +855,7 @@ Board.encode_flat_features = _board_encode_flat_features  # type: ignore[attr-de
 Board.prepare_cnn_model_input = _board_prepare_cnn_model_input  # type: ignore[attr-defined]
 Board.prepare_flat_model_input = _board_prepare_flat_model_input  # type: ignore[attr-defined]
 Board.search_best_move_exact = _board_search_best_move_exact  # type: ignore[attr-defined]
+Board.select_move_with_model = _board_select_move_with_model  # type: ignore[attr-defined]
 
 
 def play_random_game(seed: int, config: dict) -> dict:
@@ -1054,6 +1120,483 @@ def search_best_move_exact(
         "elapsed_seconds": elapsed_seconds,
         "failure_reason": failure_reason,
     }
+
+
+def _import_torch() -> object:
+    try:
+        return importlib.import_module("torch")
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "select_move_with_model を使うには PyTorch (`torch`) の導入が必要です"
+        ) from exc
+
+
+def _validate_timeout_seconds(value: object, name: str) -> float:
+    if not isinstance(value, (int, float)) or not np.isfinite(value):
+        raise ValueError(f"{name} must be a finite float >= 0.0")
+    timeout_seconds = float(value)
+    if timeout_seconds < 0.0:
+        raise ValueError(f"{name} must be a finite float >= 0.0")
+    return timeout_seconds
+
+
+def _validate_positive_depth(value: object) -> int:
+    if type(value) is not int or value <= 0:
+        raise ValueError("depth must be a positive int")
+    return value
+
+
+def _validate_policy_mode(value: object) -> str:
+    if type(value) is not str or value not in {"best", "sample"}:
+        raise ValueError("policy_mode must be 'best' or 'sample'")
+    return value
+
+
+def _validate_device(value: object) -> str:
+    if type(value) is not str or value == "":
+        raise ValueError("device must be a non-empty str")
+    return value
+
+
+def _validate_optional_exact_threshold(value: object) -> int | None:
+    return _validate_optional_positive_int(value, "exact_from_empty_threshold")
+
+
+def _validate_torch_model(model: object, torch_module: object) -> None:
+    nn_module = getattr(getattr(torch_module, "nn", None), "Module", None)
+    if nn_module is None or not isinstance(model, nn_module):
+        raise TypeError("model must be a torch.nn.Module")
+
+
+def _torch_tensor_from_numpy(torch_module: object, array: np.ndarray, device: str) -> object:
+    tensor = getattr(torch_module, "from_numpy")(np.ascontiguousarray(array, dtype=np.float32))
+    if hasattr(tensor, "to"):
+        tensor = tensor.to(device)
+    return tensor
+
+
+def _torch_output_to_numpy(output: object) -> np.ndarray:
+    if hasattr(output, "detach") and hasattr(output, "cpu") and hasattr(output, "numpy"):
+        detached = cast(Any, output).detach()
+        cpu_value = detached.cpu() if hasattr(detached, "cpu") else detached
+        return np.asarray(cpu_value.numpy(), dtype=np.float32)
+    return np.asarray(output, dtype=np.float32)
+
+
+def _classify_model_output(output: object) -> tuple[str, np.ndarray | np.float32]:
+    array = _torch_output_to_numpy(output)
+    if array.ndim == 0:
+        return "value", np.float32(array)
+    if array.ndim == 1:
+        if array.shape == (64,):
+            return "policy", array.astype(np.float32, copy=False)
+        if array.shape == (1,):
+            return "value", np.float32(array[0])
+    if array.ndim == 2:
+        if array.shape == (1, 64):
+            return "policy", array[0].astype(np.float32, copy=False)
+        if array.shape == (1, 1):
+            return "value", np.float32(array[0, 0])
+    raise ValueError("model output shape must be scalar, (1,), (1, 1), (64,), or (1, 64)")
+
+
+def _run_model_once(
+    model: object,
+    board: Board,
+    input_format: str,
+    torch_module: object,
+    device: str,
+) -> tuple[str, np.ndarray | np.float32]:
+    if input_format == "cnn":
+        input_array = prepare_cnn_model_input(board)
+    elif input_format == "flat":
+        input_array = prepare_flat_model_input(board)
+    else:
+        raise ValueError("input_format must be 'cnn' or 'flat'")
+
+    tensor = _torch_tensor_from_numpy(torch_module, input_array, device)
+    output = cast(Any, model)(tensor)
+    return _classify_model_output(output)
+
+
+def _detect_model_io(
+    model: object,
+    board: Board,
+    torch_module: object,
+    device: str,
+) -> tuple[str, str, np.ndarray | np.float32]:
+    successes: list[tuple[str, str, np.ndarray | np.float32]] = []
+    errors: list[str] = []
+    for input_format in ("cnn", "flat"):
+        try:
+            output_format, value = _run_model_once(model, board, input_format, torch_module, device)
+            successes.append((input_format, output_format, value))
+        except Exception as exc:
+            errors.append(f"{input_format}: {exc}")
+
+    if not successes:
+        joined = "; ".join(errors)
+        raise ValueError(f"model does not accept cnn or flat input: {joined}")
+    if len(successes) > 1:
+        raise ValueError("model accepts both cnn and flat input; input format is ambiguous")
+    input_format, output_format, root_output = successes[0]
+    return input_format, output_format, root_output
+
+
+def _is_probability_distribution(values: np.ndarray) -> bool:
+    if values.size == 0:
+        return False
+    if np.any(values < -1e-5):
+        return False
+    total = float(values.sum())
+    return abs(total - 1.0) <= 1e-4
+
+
+def _softmax(values: np.ndarray) -> np.ndarray:
+    shifted = values - np.max(values)
+    exp_values = np.exp(shifted).astype(np.float32, copy=False)
+    total = exp_values.sum(dtype=np.float32)
+    if not np.isfinite(total) or total <= 0.0:
+        raise ValueError("policy logits produced an invalid softmax distribution")
+    return (exp_values / total).astype(np.float32, copy=False)
+
+
+def _policy_distribution_for_board(
+    raw_policy: np.ndarray,
+    legal_moves: list[int],
+) -> np.ndarray:
+    legal_values = raw_policy[np.asarray(legal_moves, dtype=np.intp)].astype(np.float32, copy=False)
+    if _is_probability_distribution(legal_values):
+        legal_probs = legal_values.astype(np.float32, copy=False)
+    else:
+        legal_probs = _softmax(legal_values)
+    distribution = np.zeros((64,), dtype=np.float32)
+    distribution[np.asarray(legal_moves, dtype=np.intp)] = legal_probs
+    return distribution
+
+
+def _terminal_value_from_side_to_move(board: Board) -> float:
+    margin = float(final_margin_from_black(board))
+    if board.side_to_move == "white":
+        margin = -margin
+    return margin / 64.0
+
+
+class _ModelSearchTimeout(Exception):
+    pass
+
+
+def _value_search_negamax(
+    board: Board,
+    depth: int,
+    deadline: float,
+    evaluate: object,
+    searched_nodes: list[int],
+    alpha: float,
+    beta: float,
+) -> tuple[float, list[int]]:
+    if time.perf_counter() >= deadline:
+        raise _ModelSearchTimeout
+
+    status = board.board_status()
+    if status == "terminal":
+        return _terminal_value_from_side_to_move(board), []
+    if status == "forced_pass":
+        child_value, child_pv = _value_search_negamax(
+            board.apply_forced_pass(), depth, deadline, evaluate, searched_nodes, -beta, -alpha
+        )
+        return -child_value, child_pv
+    if depth == 0:
+        searched_nodes[0] += 1
+        evaluator = cast(Any, evaluate)
+        return float(evaluator(board)), []
+
+    best_value = -float("inf")
+    best_pv: list[int] = []
+    for move in board.legal_moves_list():
+        if time.perf_counter() >= deadline:
+            raise _ModelSearchTimeout
+        child_value, child_pv = _value_search_negamax(
+            board.apply_move(move),
+            depth - 1,
+            deadline,
+            evaluate,
+            searched_nodes,
+            -beta,
+            -alpha,
+        )
+        score = -child_value
+        if score > best_value:
+            best_value = score
+            best_pv = [move, *child_pv]
+        if score > alpha:
+            alpha = score
+        if alpha >= beta:
+            break
+    return best_value, best_pv
+
+
+def _success_result(
+    *,
+    best_move: int | None,
+    elapsed_seconds: float,
+    input_format: str | None,
+    output_format: str,
+    source: str,
+    forced_pass: bool = False,
+    pv: list[int] | None = None,
+    searched_nodes: int = 0,
+    value: float | None = None,
+    policy: np.ndarray | None = None,
+    selected_probability: float | None = None,
+    exact_margin: int | None = None,
+    timeout_reached: bool = False,
+) -> dict[str, object]:
+    return {
+        "success": True,
+        "best_move": best_move,
+        "value": value,
+        "policy": policy,
+        "pv": [] if pv is None else list(pv),
+        "searched_nodes": searched_nodes,
+        "elapsed_seconds": elapsed_seconds,
+        "failure_reason": None,
+        "input_format": input_format,
+        "output_format": output_format,
+        "source": source,
+        "forced_pass": forced_pass,
+        "selected_probability": selected_probability,
+        "exact_margin": exact_margin,
+        "timeout_reached": timeout_reached,
+    }
+
+
+def _failure_result(
+    *,
+    elapsed_seconds: float,
+    failure_reason: str,
+    input_format: str | None = None,
+    output_format: str | None = None,
+    source: str | None = None,
+    searched_nodes: int = 0,
+    timeout_reached: bool = False,
+) -> dict[str, object]:
+    return {
+        "success": False,
+        "best_move": None,
+        "value": None,
+        "policy": None,
+        "pv": [],
+        "searched_nodes": searched_nodes,
+        "elapsed_seconds": elapsed_seconds,
+        "failure_reason": failure_reason,
+        "input_format": input_format,
+        "output_format": output_format,
+        "source": source,
+        "forced_pass": False,
+        "selected_probability": None,
+        "exact_margin": None,
+        "timeout_reached": timeout_reached,
+    }
+
+
+def select_move_with_model(
+    board_or_record: object,
+    model: object,
+    depth: int = 1,
+    timeout_seconds: float = 1.0,
+    *,
+    policy_mode: str = "best",
+    device: str = "cpu",
+    exact_from_empty_threshold: int | None = 16,
+    exact_timeout_seconds: float | None = None,
+) -> dict[str, object]:
+    """PyTorch model を使って着手を選びます。
+
+    Args:
+        board_or_record: `Board` または `RecordedBoard`。
+        model: PyTorch `nn.Module`。
+        depth: value 出力時の探索深さ。既定値は `1`。
+        timeout_seconds: 探索全体の制限時間。
+        policy_mode: `\"best\"` または `\"sample\"`。
+        device: 推論に使う device。既定値は `\"cpu\"`。
+        exact_from_empty_threshold:
+            空き数がこの値以下なら exact 探索を優先します。
+            `None` の場合は exact へ切り替えません。
+        exact_timeout_seconds:
+            exact 探索に使う制限時間。`None` の場合は `timeout_seconds` を使います。
+
+    Returns:
+        次のキーを持つ dict。
+
+        - `success`: 着手を決定できたか
+        - `best_move`: 選択された手。強制パス時は `None`
+        - `value`: value 系評価。policy 出力時は `None`
+        - `policy`: shape `(64,)` の確率分布。value 出力時は `None`
+        - `pv`: value / exact 経路で得られた読み筋
+        - `searched_nodes`: value / exact 経路の探索ノード数
+        - `elapsed_seconds`: 実行時間
+        - `failure_reason`: 失敗理由。成功時は `None`
+        - `input_format`: `\"cnn\"` / `\"flat\"` / `None`
+        - `output_format`: `\"policy\"` / `\"value\"` / `\"exact\"` / `None`
+        - `source`: `\"policy\"` / `\"value_search\"` / `\"exact\"` / `\"forced_pass\"`
+        - `forced_pass`: 強制パス局面なら `True`
+        - `selected_probability`: policy 経路で選ばれた手の確率
+        - `exact_margin`: exact 経路の現在手番視点石差
+        - `timeout_reached`: timeout 到達後の部分結果なら `True`
+    """
+    board = _board_from_board_or_record(board_or_record)
+    validated_depth = _validate_positive_depth(depth)
+    timeout_value = _validate_timeout_seconds(timeout_seconds, "timeout_seconds")
+    validated_policy_mode = _validate_policy_mode(policy_mode)
+    validated_device = _validate_device(device)
+    exact_threshold = _validate_optional_exact_threshold(exact_from_empty_threshold)
+    exact_timeout_value = (
+        timeout_value
+        if exact_timeout_seconds is None
+        else _validate_timeout_seconds(exact_timeout_seconds, "exact_timeout_seconds")
+    )
+
+    start = time.perf_counter()
+    torch_module = _import_torch()
+    _validate_torch_model(model, torch_module)
+
+    status = board.board_status()
+    if status == "terminal":
+        return _failure_result(
+            elapsed_seconds=time.perf_counter() - start,
+            failure_reason="terminal",
+        )
+    if status == "forced_pass":
+        return _success_result(
+            best_move=None,
+            elapsed_seconds=time.perf_counter() - start,
+            input_format=None,
+            output_format="policy",
+            source="forced_pass",
+            forced_pass=True,
+        )
+    if timeout_value == 0.0:
+        return _failure_result(
+            elapsed_seconds=time.perf_counter() - start,
+            failure_reason="timeout",
+            timeout_reached=True,
+        )
+
+    was_training = bool(getattr(model, "training", False))
+    if hasattr(model, "eval"):
+        cast(Any, model).eval()
+    try:
+        with getattr(torch_module, "no_grad")():
+            empty_count = disc_count(board)[2]
+            if exact_threshold is not None and empty_count <= exact_threshold:
+                remaining = max(0.0, timeout_value - (time.perf_counter() - start))
+                exact_budget = min(exact_timeout_value, remaining)
+                if exact_budget > 0.0:
+                    exact_result = search_best_move_exact(board, exact_budget)
+                    if cast(bool, exact_result["success"]):
+                        exact_margin = cast(int, exact_result["exact_margin"])
+                        return _success_result(
+                            best_move=cast(int | None, exact_result["best_move"]),
+                            elapsed_seconds=time.perf_counter() - start,
+                            input_format=None,
+                            output_format="exact",
+                            source="exact",
+                            pv=cast(list[int], exact_result["pv"]),
+                            searched_nodes=cast(int, exact_result["searched_nodes"]),
+                            value=float(exact_margin) / 64.0,
+                            exact_margin=exact_margin,
+                        )
+
+            deadline = start + timeout_value
+            input_format, output_format, root_output = _detect_model_io(
+                model, board, torch_module, validated_device
+            )
+
+            if output_format == "policy":
+                raw_policy = cast(np.ndarray, root_output)
+                legal_moves = board.legal_moves_list()
+                distribution = _policy_distribution_for_board(raw_policy, legal_moves)
+                legal_probs = distribution[np.asarray(legal_moves, dtype=np.intp)]
+                if validated_policy_mode == "best":
+                    chosen_idx = int(np.argmax(legal_probs))
+                else:
+                    rng = np.random.default_rng()
+                    chosen_idx = int(rng.choice(len(legal_moves), p=legal_probs))
+                selected_move = legal_moves[chosen_idx]
+                return _success_result(
+                    best_move=selected_move,
+                    elapsed_seconds=time.perf_counter() - start,
+                    input_format=input_format,
+                    output_format="policy",
+                    source="policy",
+                    pv=[selected_move],
+                    policy=distribution,
+                    selected_probability=float(legal_probs[chosen_idx]),
+                    timeout_reached=time.perf_counter() >= deadline,
+                )
+
+            def evaluate_position(current_board: Board) -> float:
+                _, value_output = _run_model_once(
+                    model, current_board, input_format, torch_module, validated_device
+                )
+                return float(cast(np.float32, value_output))
+
+            searched_nodes = [0]
+            legal_moves = board.legal_moves_list()
+            best_move: int | None = None
+            best_value = -float("inf")
+            best_pv: list[int] = []
+            timeout_reached = False
+
+            for move in legal_moves:
+                if time.perf_counter() >= deadline:
+                    timeout_reached = True
+                    break
+                try:
+                    child_value, child_pv = _value_search_negamax(
+                        board.apply_move(move),
+                        validated_depth - 1,
+                        deadline,
+                        evaluate_position,
+                        searched_nodes,
+                        -float("inf"),
+                        float("inf"),
+                    )
+                except _ModelSearchTimeout:
+                    timeout_reached = True
+                    break
+                score = -child_value
+                if score > best_value:
+                    best_value = score
+                    best_move = move
+                    best_pv = [move, *child_pv]
+
+            elapsed = time.perf_counter() - start
+            if best_move is None:
+                return _failure_result(
+                    elapsed_seconds=elapsed,
+                    failure_reason="timeout" if timeout_reached else "no_legal_moves",
+                    input_format=input_format,
+                    output_format="value",
+                    source="value_search",
+                    searched_nodes=searched_nodes[0],
+                    timeout_reached=timeout_reached,
+                )
+            return _success_result(
+                best_move=best_move,
+                elapsed_seconds=elapsed,
+                input_format=input_format,
+                output_format="value",
+                source="value_search",
+                pv=best_pv,
+                searched_nodes=searched_nodes[0],
+                value=float(best_value),
+                timeout_reached=timeout_reached,
+            )
+    finally:
+        if hasattr(model, "train"):
+            cast(Any, model).train(was_training)
 
 
 def _validate_random_game_trace(trace: object) -> dict[object, object]:

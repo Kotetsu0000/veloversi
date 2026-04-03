@@ -33,6 +33,17 @@ class Board:
         serial_fallback_empty_threshold: int = 18,
         shared_tt_empty_threshold: int = 20,
     ) -> dict[str, object]: ...
+    def select_move_with_model(
+        self,
+        model: object,
+        depth: int = 1,
+        timeout_seconds: float = 1.0,
+        *,
+        policy_mode: str = "best",
+        device: str = "cpu",
+        exact_from_empty_threshold: int | None = 16,
+        exact_timeout_seconds: float | None = None,
+    ) -> dict[str, object]: ...
 
 def initial_board() -> Board: ...
 def board_from_bits(black_bits: int, white_bits: int, side_to_move: str) -> Board: ...
