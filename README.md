@@ -136,7 +136,7 @@ packed supervised example には、少なくとも次が含まれます。
 - `board.prepare_cnn_model_input()`
 - `board.prepare_flat_model_input()`
 - `board.search_best_move_exact(timeout_seconds=1.0, worker_count=None, serial_fallback_empty_threshold=18, shared_tt_empty_threshold=20)`
-- `board.select_move_with_model(model, depth=1, timeout_seconds=1.0, policy_mode="best", device="cpu", exact_from_empty_threshold=16, exact_timeout_seconds=None)`
+- `board.select_move_with_model(model, depth=1, timeout_seconds=1.0, policy_mode="best", device="cpu", exact_from_empty_threshold=16)`
 
 汎用 feature API:
 
@@ -279,7 +279,7 @@ else:
   - 合法手上の確率分布からサンプリングします
 - 強制パス局面では model を呼ばず、着手なし結果を返します
 - `exact_from_empty_threshold` 以下の終盤では exact と model を並列に開始します
-- exact が `exact_timeout_seconds` 以内に成功すれば exact を返します
+- 制限時間内に exact が成功すれば exact を返します
 - exact が timeout / failure でも、model 側に結果があれば model を返します
 
 exact 探索の設定:

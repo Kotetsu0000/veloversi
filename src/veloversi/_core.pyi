@@ -42,7 +42,6 @@ class Board:
         policy_mode: str = "best",
         device: str = "cpu",
         exact_from_empty_threshold: int | None = 16,
-        exact_timeout_seconds: float | None = None,
     ) -> dict[str, object]: ...
 
 def initial_board() -> Board: ...

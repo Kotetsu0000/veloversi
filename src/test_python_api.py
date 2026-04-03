@@ -822,7 +822,6 @@ def test_select_move_with_model_uses_exact_fallback_and_prefers_exact_result(
         board,
         model,
         exact_from_empty_threshold=10,
-        exact_timeout_seconds=1.0,
     )
 
     assert result["success"] is True
@@ -890,7 +889,6 @@ def test_select_move_with_model_prefers_exact_result_when_concurrent(
         model,
         policy_mode="best",
         exact_from_empty_threshold=64,
-        exact_timeout_seconds=0.1,
         timeout_seconds=0.5,
     )
 
@@ -935,7 +933,6 @@ def test_select_move_with_model_returns_model_result_after_exact_failure(
         model,
         policy_mode="best",
         exact_from_empty_threshold=64,
-        exact_timeout_seconds=0.05,
         timeout_seconds=0.5,
     )
     elapsed = time.perf_counter() - started
@@ -944,7 +941,7 @@ def test_select_move_with_model_returns_model_result_after_exact_failure(
     assert result["source"] == "policy"
     assert result["best_move"] == 44
     assert result["timeout_reached"] is True
-    assert elapsed < 0.15
+    assert 0.18 <= elapsed < 0.5
 
 
 def test_finish_game_recording_requires_terminal_board() -> None:

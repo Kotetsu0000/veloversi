@@ -357,7 +357,6 @@ class RecordedBoard:
         policy_mode: str = "best",
         device: str = "cpu",
         exact_from_empty_threshold: int | None = 16,
-        exact_timeout_seconds: float | None = None,
     ) -> dict[str, object]:
         """PyTorch model を使って現在局面の着手を選びます。
 
@@ -370,8 +369,6 @@ class RecordedBoard:
             exact_from_empty_threshold:
                 空き数がこの値以下なら exact 探索を優先します。
                 `None` の場合は exact へ切り替えません。
-            exact_timeout_seconds:
-                exact 探索に使う制限時間。`None` の場合は `timeout_seconds` を使います。
 
         Notes:
             `RecordedBoard` では常に `current_board` を対象にします。
@@ -384,7 +381,6 @@ class RecordedBoard:
             policy_mode=policy_mode,
             device=device,
             exact_from_empty_threshold=exact_from_empty_threshold,
-            exact_timeout_seconds=exact_timeout_seconds,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -826,7 +822,6 @@ def _board_select_move_with_model(
     policy_mode: str = "best",
     device: str = "cpu",
     exact_from_empty_threshold: int | None = 16,
-    exact_timeout_seconds: float | None = None,
 ) -> dict[str, object]:
     """PyTorch model を使って盤面の着手を選びます。"""
     return select_move_with_model(
@@ -837,7 +832,6 @@ def _board_select_move_with_model(
         policy_mode=policy_mode,
         device=device,
         exact_from_empty_threshold=exact_from_empty_threshold,
-        exact_timeout_seconds=exact_timeout_seconds,
     )
 
 
@@ -1546,7 +1540,6 @@ def select_move_with_model(
     policy_mode: str = "best",
     device: str = "cpu",
     exact_from_empty_threshold: int | None = 16,
-    exact_timeout_seconds: float | None = None,
 ) -> dict[str, object]:
     """PyTorch model を使って着手を選びます。
 
@@ -1560,10 +1553,6 @@ def select_move_with_model(
         exact_from_empty_threshold:
             空き数がこの値以下なら exact 探索を優先します。
             `None` の場合は exact へ切り替えません。
-        exact_timeout_seconds:
-            exact 探索に使う制限時間。`None` の場合は `timeout_seconds` を使います。
-            `exact_from_empty_threshold` 以下では exact と model を並列に開始し、
-            exact がこの制限内で成功すれば exact を返します。
 
     Returns:
         次のキーを持つ dict。
@@ -1590,11 +1579,6 @@ def select_move_with_model(
     validated_policy_mode = _validate_policy_mode(policy_mode)
     validated_device = _validate_device(device)
     exact_threshold = _validate_optional_exact_threshold(exact_from_empty_threshold)
-    exact_timeout_value = (
-        timeout_value
-        if exact_timeout_seconds is None
-        else _validate_timeout_seconds(exact_timeout_seconds, "exact_timeout_seconds")
-    )
 
     start = time.perf_counter()
     torch_module = _import_torch()
@@ -1623,7 +1607,7 @@ def select_move_with_model(
         )
 
     overall_deadline = start + timeout_value
-    exact_deadline = start + min(timeout_value, exact_timeout_value)
+    exact_deadline = overall_deadline
     was_training = bool(getattr(model, "training", False))
     if hasattr(model, "eval"):
         cast(Any, model).eval()

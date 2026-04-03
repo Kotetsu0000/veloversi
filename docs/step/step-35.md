@@ -33,9 +33,9 @@
 
 想定 API:
 
-- `select_move_with_model(board_or_record, model, depth=1, timeout_seconds=1.0, policy_mode="best", device="cpu", exact_from_empty_threshold=None, exact_timeout_seconds=None)`
-- `board.select_move_with_model(model, depth=1, timeout_seconds=1.0, policy_mode="best", device="cpu", exact_from_empty_threshold=None, exact_timeout_seconds=None)`
-- `record.select_move_with_model(model, depth=1, timeout_seconds=1.0, policy_mode="best", device="cpu", exact_from_empty_threshold=None, exact_timeout_seconds=None)`
+- `select_move_with_model(board_or_record, model, depth=1, timeout_seconds=1.0, policy_mode="best", device="cpu", exact_from_empty_threshold=None)`
+- `board.select_move_with_model(model, depth=1, timeout_seconds=1.0, policy_mode="best", device="cpu", exact_from_empty_threshold=None)`
+- `record.select_move_with_model(model, depth=1, timeout_seconds=1.0, policy_mode="best", device="cpu", exact_from_empty_threshold=None)`
 
 ### Phase 2: 入力形式の自動判別
 
@@ -77,7 +77,7 @@
 - timeout 到達時は、その時点での最善手を返す
 - value の視点は現在手番視点に固定する
 - `exact_from_empty_threshold` 以下の空き数では `search_best_move_exact` に切り替える
-- exact 経路の timeout は `exact_timeout_seconds` を使い、未指定なら `timeout_seconds` を使う
+- exact 経路も `timeout_seconds` を共有で使う
 
 ### Phase 6: 文書と検証
 
@@ -220,7 +220,7 @@
 - 解決策:
   - 切り替え条件は手数ではなく空きマス数にする
   - `exact_from_empty_threshold` を公開引数にする
-  - timeout は `exact_timeout_seconds` で別指定できるようにする
+  - timeout は API 全体で `timeout_seconds` を共有する
 
 ## 実装結果
 
