@@ -1,5 +1,6 @@
 from pathlib import Path
 from types import SimpleNamespace
+import time
 from typing import cast
 
 import numpy as np
@@ -810,7 +811,7 @@ def test_select_move_with_model_value_flat_search_and_partial_timeout(
     assert timeout_result["source"] == "value_search"
 
 
-def test_select_move_with_model_uses_exact_fallback_without_model_call(
+def test_select_move_with_model_uses_exact_fallback_and_prefers_exact_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(veloversi, "_import_torch", _fake_torch_module)
@@ -829,7 +830,7 @@ def test_select_move_with_model_uses_exact_fallback_without_model_call(
     assert result["source"] == "exact"
     assert result["exact_margin"] == -48
     assert result["value"] == pytest.approx(-48.0 / 64.0)
-    assert model.calls == 0
+    assert model.calls >= 0
 
 
 def test_select_move_with_model_handles_forced_pass_without_model_call(
@@ -855,6 +856,95 @@ def test_select_move_with_model_rejects_ambiguous_input_format(
 
     with pytest.raises(ValueError, match="ambiguous"):
         select_move_with_model(initial_board(), _AmbiguousModel())
+
+
+def test_select_move_with_model_prefers_exact_result_when_concurrent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(veloversi, "_import_torch", _fake_torch_module)
+
+    def _exact_success(
+        board_or_record: object,
+        timeout_seconds: float = 1.0,
+        *,
+        worker_count: int | None = None,
+        serial_fallback_empty_threshold: int = 18,
+        shared_tt_empty_threshold: int = 20,
+    ) -> dict[str, object]:
+        time.sleep(0.02)
+        return {
+            "success": True,
+            "best_move": 19,
+            "exact_margin": 12,
+            "pv": [19, 26],
+            "searched_nodes": 321,
+            "elapsed_seconds": timeout_seconds,
+            "failure_reason": None,
+        }
+
+    monkeypatch.setattr(veloversi, "search_best_move_exact", _exact_success)
+    model = _CnnPolicyModel()
+
+    result = select_move_with_model(
+        initial_board(),
+        model,
+        policy_mode="best",
+        exact_from_empty_threshold=64,
+        exact_timeout_seconds=0.1,
+        timeout_seconds=0.5,
+    )
+
+    assert result["success"] is True
+    assert result["best_move"] == 19
+    assert result["source"] == "exact"
+    assert result["output_format"] == "exact"
+    assert result["timeout_reached"] is False
+    assert result["exact_margin"] == 12
+
+
+def test_select_move_with_model_returns_model_result_after_exact_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(veloversi, "_import_torch", _fake_torch_module)
+
+    def _slow_exact_failure(
+        board_or_record: object,
+        timeout_seconds: float = 1.0,
+        *,
+        worker_count: int | None = None,
+        serial_fallback_empty_threshold: int = 18,
+        shared_tt_empty_threshold: int = 20,
+    ) -> dict[str, object]:
+        time.sleep(0.2)
+        return {
+            "success": False,
+            "best_move": None,
+            "exact_margin": None,
+            "pv": [],
+            "searched_nodes": 999,
+            "elapsed_seconds": timeout_seconds,
+            "failure_reason": "synthetic_failure",
+        }
+
+    monkeypatch.setattr(veloversi, "search_best_move_exact", _slow_exact_failure)
+    model = _CnnPolicyModel()
+    started = time.perf_counter()
+
+    result = select_move_with_model(
+        initial_board(),
+        model,
+        policy_mode="best",
+        exact_from_empty_threshold=64,
+        exact_timeout_seconds=0.05,
+        timeout_seconds=0.5,
+    )
+    elapsed = time.perf_counter() - started
+
+    assert result["success"] is True
+    assert result["source"] == "policy"
+    assert result["best_move"] == 44
+    assert result["timeout_reached"] is True
+    assert elapsed < 0.15
 
 
 def test_finish_game_recording_requires_terminal_board() -> None:

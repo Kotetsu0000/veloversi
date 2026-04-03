@@ -1001,6 +1001,7 @@ fn encode_flat_features_batch_parts_py<'py>(
 #[pyfunction(name = "_search_best_move_exact_parts")]
 #[cfg(not(any(test, coverage)))]
 fn search_best_move_exact_parts_py(
+    py: Python<'_>,
     board: &PyBoard,
     timeout_seconds: f64,
     worker_count: Option<usize>,
@@ -1019,7 +1020,10 @@ fn search_best_move_exact_parts_py(
         serial_fallback_empty_threshold,
         shared_tt_empty_threshold,
     };
-    match crate::search_best_move_exact_with_config(&board.inner, &config) {
+    let board_inner = board.inner;
+    let result =
+        py.detach(move || crate::search_best_move_exact_with_config(&board_inner, &config));
+    match result {
         Ok(result) => Ok(solve_result_to_py_parts(result)),
         Err(err) => Ok((
             false,

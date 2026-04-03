@@ -1,4 +1,5 @@
 from bisect import bisect_right
+import concurrent.futures
 import importlib
 from pathlib import Path
 import time
@@ -1400,6 +1401,142 @@ def _failure_result(
     }
 
 
+def _exact_result_to_selection_result(
+    exact_result: dict[str, object],
+    *,
+    elapsed_seconds: float,
+) -> dict[str, object]:
+    exact_margin = cast(int, exact_result["exact_margin"])
+    return _success_result(
+        best_move=cast(int | None, exact_result["best_move"]),
+        elapsed_seconds=elapsed_seconds,
+        input_format=None,
+        output_format="exact",
+        source="exact",
+        pv=cast(list[int], exact_result["pv"]),
+        searched_nodes=cast(int, exact_result["searched_nodes"]),
+        value=float(exact_margin) / 64.0,
+        exact_margin=exact_margin,
+        timeout_reached=False,
+    )
+
+
+def _is_model_fallback_candidate(result: dict[str, object]) -> bool:
+    return bool(result["success"]) and result["best_move"] is not None
+
+
+def _with_elapsed(
+    result: dict[str, object],
+    *,
+    start_time: float,
+    timeout_reached: bool | None = None,
+) -> dict[str, object]:
+    updated = dict(result)
+    updated["elapsed_seconds"] = time.perf_counter() - start_time
+    if timeout_reached is not None:
+        updated["timeout_reached"] = timeout_reached
+    return updated
+
+
+def _run_model_selection_path(
+    *,
+    board: Board,
+    model: object,
+    depth: int,
+    deadline: float,
+    policy_mode: str,
+    device: str,
+    torch_module: object,
+    start_time: float,
+) -> dict[str, object]:
+    with getattr(torch_module, "no_grad")():
+        input_format, output_format, root_output = _detect_model_io(
+            model, board, torch_module, device
+        )
+
+        if output_format == "policy":
+            raw_policy = cast(np.ndarray, root_output)
+            legal_moves = board.legal_moves_list()
+            distribution = _policy_distribution_for_board(raw_policy, legal_moves)
+            legal_probs = distribution[np.asarray(legal_moves, dtype=np.intp)]
+            if policy_mode == "best":
+                chosen_idx = int(np.argmax(legal_probs))
+            else:
+                rng = np.random.default_rng()
+                chosen_idx = int(rng.choice(len(legal_moves), p=legal_probs))
+            selected_move = legal_moves[chosen_idx]
+            return _success_result(
+                best_move=selected_move,
+                elapsed_seconds=time.perf_counter() - start_time,
+                input_format=input_format,
+                output_format="policy",
+                source="policy",
+                pv=[selected_move],
+                policy=distribution,
+                selected_probability=float(legal_probs[chosen_idx]),
+                timeout_reached=time.perf_counter() >= deadline,
+            )
+
+        def evaluate_position(current_board: Board) -> float:
+            _, value_output = _run_model_once(
+                model, current_board, input_format, torch_module, device
+            )
+            return float(cast(np.float32, value_output))
+
+        searched_nodes = [0]
+        legal_moves = board.legal_moves_list()
+        best_move: int | None = None
+        best_value = -float("inf")
+        best_pv: list[int] = []
+        timeout_reached = False
+
+        for move in legal_moves:
+            if time.perf_counter() >= deadline:
+                timeout_reached = True
+                break
+            try:
+                child_value, child_pv = _value_search_negamax(
+                    board.apply_move(move),
+                    depth - 1,
+                    deadline,
+                    evaluate_position,
+                    searched_nodes,
+                    -float("inf"),
+                    float("inf"),
+                )
+            except _ModelSearchTimeout:
+                timeout_reached = True
+                break
+            score = -child_value
+            if score > best_value:
+                best_value = score
+                best_move = move
+                best_pv = [move, *child_pv]
+
+        elapsed = time.perf_counter() - start_time
+        if best_move is None:
+            return _failure_result(
+                elapsed_seconds=elapsed,
+                failure_reason="timeout" if timeout_reached else "no_legal_moves",
+                input_format=input_format,
+                output_format="value",
+                source="value_search",
+                searched_nodes=searched_nodes[0],
+                timeout_reached=timeout_reached,
+            )
+        return _success_result(
+            best_move=best_move,
+            elapsed_seconds=elapsed,
+            input_format=input_format,
+            output_format="value",
+            source="value_search",
+            pv=best_pv,
+            searched_nodes=searched_nodes[0],
+            value=float(best_value),
+            timeout_reached=timeout_reached,
+        )
+
+
 def select_move_with_model(
     board_or_record: object,
     model: object,
@@ -1425,6 +1562,8 @@ def select_move_with_model(
             `None` の場合は exact へ切り替えません。
         exact_timeout_seconds:
             exact 探索に使う制限時間。`None` の場合は `timeout_seconds` を使います。
+            `exact_from_empty_threshold` 以下では exact と model を並列に開始し、
+            exact がこの制限内で成功すれば exact を返します。
 
     Returns:
         次のキーを持つ dict。
@@ -1443,7 +1582,7 @@ def select_move_with_model(
         - `forced_pass`: 強制パス局面なら `True`
         - `selected_probability`: policy 経路で選ばれた手の確率
         - `exact_margin`: exact 経路の現在手番視点石差
-        - `timeout_reached`: timeout 到達後の部分結果なら `True`
+        - `timeout_reached`: value 探索の部分結果、または exact timeout/failure 後の model fallback なら `True`
     """
     board = _board_from_board_or_record(board_or_record)
     validated_depth = _validate_positive_depth(depth)
@@ -1483,117 +1622,148 @@ def select_move_with_model(
             timeout_reached=True,
         )
 
+    overall_deadline = start + timeout_value
+    exact_deadline = start + min(timeout_value, exact_timeout_value)
     was_training = bool(getattr(model, "training", False))
     if hasattr(model, "eval"):
         cast(Any, model).eval()
     try:
-        with getattr(torch_module, "no_grad")():
-            empty_count = disc_count(board)[2]
-            if exact_threshold is not None and empty_count <= exact_threshold:
-                remaining = max(0.0, timeout_value - (time.perf_counter() - start))
-                exact_budget = min(exact_timeout_value, remaining)
-                if exact_budget > 0.0:
-                    exact_result = search_best_move_exact(board, exact_budget)
-                    if cast(bool, exact_result["success"]):
-                        exact_margin = cast(int, exact_result["exact_margin"])
-                        return _success_result(
-                            best_move=cast(int | None, exact_result["best_move"]),
+        empty_count = disc_count(board)[2]
+        if exact_threshold is not None and empty_count <= exact_threshold:
+            model_result: dict[str, object] | None = None
+            model_exception: BaseException | None = None
+            exact_result: dict[str, object] | None = None
+            exact_consumed = False
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+            exact_future: concurrent.futures.Future[dict[str, object]] | None = None
+            model_future: concurrent.futures.Future[dict[str, object]] | None = None
+            try:
+                remaining_exact = max(0.0, exact_deadline - time.perf_counter())
+                if remaining_exact > 0.0:
+                    exact_future = executor.submit(search_best_move_exact, board, remaining_exact)
+                else:
+                    exact_consumed = True
+
+                model_future = executor.submit(
+                    _run_model_selection_path,
+                    board=board,
+                    model=model,
+                    depth=validated_depth,
+                    deadline=overall_deadline,
+                    policy_mode=validated_policy_mode,
+                    device=validated_device,
+                    torch_module=torch_module,
+                    start_time=start,
+                )
+
+                while True:
+                    now = time.perf_counter()
+                    if exact_future is not None and exact_future.done():
+                        exact_result = exact_future.result()
+                        exact_future = None
+                        exact_consumed = True
+                        if cast(bool, exact_result["success"]):
+                            return _exact_result_to_selection_result(
+                                exact_result,
+                                elapsed_seconds=time.perf_counter() - start,
+                            )
+                        if model_result is not None and _is_model_fallback_candidate(model_result):
+                            return _with_elapsed(
+                                model_result,
+                                start_time=start,
+                                timeout_reached=True,
+                            )
+                        if model_exception is not None:
+                            raise model_exception
+
+                    if model_future is not None and model_future.done():
+                        try:
+                            model_result = model_future.result()
+                        except BaseException as exc:
+                            model_exception = exc
+                        model_future = None
+                        if exact_consumed:
+                            if model_result is not None and _is_model_fallback_candidate(
+                                model_result
+                            ):
+                                return _with_elapsed(
+                                    model_result,
+                                    start_time=start,
+                                    timeout_reached=True,
+                                )
+                            if model_exception is not None:
+                                raise model_exception
+
+                    now = time.perf_counter()
+                    if not exact_consumed and now >= exact_deadline:
+                        exact_consumed = True
+                        exact_future = None
+                        if model_result is not None and _is_model_fallback_candidate(model_result):
+                            return _with_elapsed(
+                                model_result,
+                                start_time=start,
+                                timeout_reached=True,
+                            )
+                        if model_exception is not None:
+                            raise model_exception
+
+                    if now >= overall_deadline:
+                        if model_result is not None and _is_model_fallback_candidate(model_result):
+                            return _with_elapsed(
+                                model_result,
+                                start_time=start,
+                                timeout_reached=True,
+                            )
+                        if model_exception is not None and exact_consumed:
+                            raise model_exception
+                        return _failure_result(
                             elapsed_seconds=time.perf_counter() - start,
-                            input_format=None,
-                            output_format="exact",
-                            source="exact",
-                            pv=cast(list[int], exact_result["pv"]),
-                            searched_nodes=cast(int, exact_result["searched_nodes"]),
-                            value=float(exact_margin) / 64.0,
-                            exact_margin=exact_margin,
+                            failure_reason="timeout",
+                            timeout_reached=True,
                         )
 
-            deadline = start + timeout_value
-            input_format, output_format, root_output = _detect_model_io(
-                model, board, torch_module, validated_device
-            )
+                    pending: list[concurrent.futures.Future[dict[str, object]]] = []
+                    if exact_future is not None:
+                        pending.append(exact_future)
+                    if model_future is not None:
+                        pending.append(model_future)
+                    if not pending:
+                        if model_result is not None and _is_model_fallback_candidate(model_result):
+                            return _with_elapsed(
+                                model_result,
+                                start_time=start,
+                                timeout_reached=True,
+                            )
+                        if model_exception is not None:
+                            raise model_exception
+                        return _failure_result(
+                            elapsed_seconds=time.perf_counter() - start,
+                            failure_reason="timeout",
+                            timeout_reached=True,
+                        )
 
-            if output_format == "policy":
-                raw_policy = cast(np.ndarray, root_output)
-                legal_moves = board.legal_moves_list()
-                distribution = _policy_distribution_for_board(raw_policy, legal_moves)
-                legal_probs = distribution[np.asarray(legal_moves, dtype=np.intp)]
-                if validated_policy_mode == "best":
-                    chosen_idx = int(np.argmax(legal_probs))
-                else:
-                    rng = np.random.default_rng()
-                    chosen_idx = int(rng.choice(len(legal_moves), p=legal_probs))
-                selected_move = legal_moves[chosen_idx]
-                return _success_result(
-                    best_move=selected_move,
-                    elapsed_seconds=time.perf_counter() - start,
-                    input_format=input_format,
-                    output_format="policy",
-                    source="policy",
-                    pv=[selected_move],
-                    policy=distribution,
-                    selected_probability=float(legal_probs[chosen_idx]),
-                    timeout_reached=time.perf_counter() >= deadline,
-                )
-
-            def evaluate_position(current_board: Board) -> float:
-                _, value_output = _run_model_once(
-                    model, current_board, input_format, torch_module, validated_device
-                )
-                return float(cast(np.float32, value_output))
-
-            searched_nodes = [0]
-            legal_moves = board.legal_moves_list()
-            best_move: int | None = None
-            best_value = -float("inf")
-            best_pv: list[int] = []
-            timeout_reached = False
-
-            for move in legal_moves:
-                if time.perf_counter() >= deadline:
-                    timeout_reached = True
-                    break
-                try:
-                    child_value, child_pv = _value_search_negamax(
-                        board.apply_move(move),
-                        validated_depth - 1,
-                        deadline,
-                        evaluate_position,
-                        searched_nodes,
-                        -float("inf"),
-                        float("inf"),
+                    next_deadline = overall_deadline
+                    if not exact_consumed:
+                        next_deadline = min(next_deadline, exact_deadline)
+                    wait_timeout = max(0.0, next_deadline - now)
+                    concurrent.futures.wait(
+                        pending,
+                        timeout=wait_timeout,
+                        return_when=concurrent.futures.FIRST_COMPLETED,
                     )
-                except _ModelSearchTimeout:
-                    timeout_reached = True
-                    break
-                score = -child_value
-                if score > best_value:
-                    best_value = score
-                    best_move = move
-                    best_pv = [move, *child_pv]
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
 
-            elapsed = time.perf_counter() - start
-            if best_move is None:
-                return _failure_result(
-                    elapsed_seconds=elapsed,
-                    failure_reason="timeout" if timeout_reached else "no_legal_moves",
-                    input_format=input_format,
-                    output_format="value",
-                    source="value_search",
-                    searched_nodes=searched_nodes[0],
-                    timeout_reached=timeout_reached,
-                )
-            return _success_result(
-                best_move=best_move,
-                elapsed_seconds=elapsed,
-                input_format=input_format,
-                output_format="value",
-                source="value_search",
-                pv=best_pv,
-                searched_nodes=searched_nodes[0],
-                value=float(best_value),
-                timeout_reached=timeout_reached,
-            )
+        return _run_model_selection_path(
+            board=board,
+            model=model,
+            depth=validated_depth,
+            deadline=overall_deadline,
+            policy_mode=validated_policy_mode,
+            device=validated_device,
+            torch_module=torch_module,
+            start_time=start,
+        )
     finally:
         if hasattr(model, "train"):
             cast(Any, model).train(was_training)

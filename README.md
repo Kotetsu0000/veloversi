@@ -278,7 +278,9 @@ else:
 - `policy_mode="sample"`
   - 合法手上の確率分布からサンプリングします
 - 強制パス局面では model を呼ばず、着手なし結果を返します
-- `exact_from_empty_threshold` 以下の終盤では `search_best_move_exact(...)` を優先します
+- `exact_from_empty_threshold` 以下の終盤では exact と model を並列に開始します
+- exact が `exact_timeout_seconds` 以内に成功すれば exact を返します
+- exact が timeout / failure でも、model 側に結果があれば model を返します
 
 exact 探索の設定:
 
