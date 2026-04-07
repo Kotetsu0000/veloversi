@@ -357,6 +357,7 @@ class RecordedBoard:
         policy_mode: str = "best",
         device: str = "cpu",
         exact_from_empty_threshold: int | None = 16,
+        always_try_exact: bool = False,
     ) -> dict[str, object]:
         """PyTorch model を使って現在局面の着手を選びます。
 
@@ -369,6 +370,9 @@ class RecordedBoard:
             exact_from_empty_threshold:
                 空き数がこの値以下なら exact 探索を優先します。
                 `None` の場合は exact へ切り替えません。
+        always_try_exact:
+            `True` の場合、`exact_from_empty_threshold` を超える局面でも
+            exact と model を並列開始します。閾値以下は値に関係なく exact-only で動作します。
 
         Notes:
             `RecordedBoard` では常に `current_board` を対象にします。
@@ -381,6 +385,7 @@ class RecordedBoard:
             policy_mode=policy_mode,
             device=device,
             exact_from_empty_threshold=exact_from_empty_threshold,
+            always_try_exact=always_try_exact,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -822,6 +827,7 @@ def _board_select_move_with_model(
     policy_mode: str = "best",
     device: str = "cpu",
     exact_from_empty_threshold: int | None = 16,
+    always_try_exact: bool = False,
 ) -> dict[str, object]:
     """PyTorch model を使って盤面の着手を選びます。"""
     return select_move_with_model(
@@ -832,6 +838,7 @@ def _board_select_move_with_model(
         policy_mode=policy_mode,
         device=device,
         exact_from_empty_threshold=exact_from_empty_threshold,
+        always_try_exact=always_try_exact,
     )
 
 
@@ -1157,6 +1164,12 @@ def _validate_optional_exact_threshold(value: object) -> int | None:
     return _validate_optional_positive_int(value, "exact_from_empty_threshold")
 
 
+def _validate_always_try_exact(value: object) -> bool:
+    if type(value) is not bool:
+        raise ValueError("always_try_exact must be a bool")
+    return cast(bool, value)
+
+
 def _validate_torch_model(model: object, torch_module: object) -> None:
     nn_module = getattr(getattr(torch_module, "nn", None), "Module", None)
     if nn_module is None or not isinstance(model, nn_module):
@@ -1415,6 +1428,22 @@ def _exact_result_to_selection_result(
     )
 
 
+def _exact_failure_to_selection_result(
+    exact_result: dict[str, object],
+    *,
+    elapsed_seconds: float,
+) -> dict[str, object]:
+    failure_reason = cast(str | None, exact_result["failure_reason"]) or "timeout"
+    return _failure_result(
+        elapsed_seconds=elapsed_seconds,
+        failure_reason=failure_reason,
+        output_format="exact",
+        source="exact",
+        searched_nodes=cast(int, exact_result["searched_nodes"]),
+        timeout_reached=failure_reason == "timeout",
+    )
+
+
 def _is_model_fallback_candidate(result: dict[str, object]) -> bool:
     return bool(result["success"]) and result["best_move"] is not None
 
@@ -1540,6 +1569,7 @@ def select_move_with_model(
     policy_mode: str = "best",
     device: str = "cpu",
     exact_from_empty_threshold: int | None = 16,
+    always_try_exact: bool = False,
 ) -> dict[str, object]:
     """PyTorch model を使って着手を選びます。
 
@@ -1553,6 +1583,9 @@ def select_move_with_model(
         exact_from_empty_threshold:
             空き数がこの値以下なら exact 探索を優先します。
             `None` の場合は exact へ切り替えません。
+        always_try_exact:
+            `True` の場合、閾値より手前では exact / model を並列開始します。
+            閾値以下の最終盤では値に関係なく exact-only で動作します。
 
     Returns:
         次のキーを持つ dict。
@@ -1571,7 +1604,7 @@ def select_move_with_model(
         - `forced_pass`: 強制パス局面なら `True`
         - `selected_probability`: policy 経路で選ばれた手の確率
         - `exact_margin`: exact 経路の現在手番視点石差
-        - `timeout_reached`: value 探索の部分結果、または exact timeout/failure 後の model fallback なら `True`
+        - `timeout_reached`: timeout に達した場合に `True`
     """
     board = _board_from_board_or_record(board_or_record)
     validated_depth = _validate_positive_depth(depth)
@@ -1579,6 +1612,7 @@ def select_move_with_model(
     validated_policy_mode = _validate_policy_mode(policy_mode)
     validated_device = _validate_device(device)
     exact_threshold = _validate_optional_exact_threshold(exact_from_empty_threshold)
+    validated_always_try_exact = _validate_always_try_exact(always_try_exact)
 
     start = time.perf_counter()
     torch_module = _import_torch()
@@ -1613,7 +1647,21 @@ def select_move_with_model(
         cast(Any, model).eval()
     try:
         empty_count = disc_count(board)[2]
-        if exact_threshold is not None and empty_count <= exact_threshold:
+        should_use_default_exact = exact_threshold is not None and empty_count <= exact_threshold
+        if should_use_default_exact:
+            exact_result = search_best_move_exact(board, timeout_value)
+            elapsed_seconds = time.perf_counter() - start
+            if cast(bool, exact_result["success"]):
+                return _exact_result_to_selection_result(
+                    exact_result,
+                    elapsed_seconds=elapsed_seconds,
+                )
+            return _exact_failure_to_selection_result(
+                exact_result,
+                elapsed_seconds=elapsed_seconds,
+            )
+
+        if validated_always_try_exact:
             model_result: dict[str, object] | None = None
             model_exception: BaseException | None = None
             exact_result: dict[str, object] | None = None
@@ -1655,7 +1703,6 @@ def select_move_with_model(
                             return _with_elapsed(
                                 model_result,
                                 start_time=start,
-                                timeout_reached=True,
                             )
                         if model_exception is not None:
                             raise model_exception
@@ -1666,17 +1713,13 @@ def select_move_with_model(
                         except BaseException as exc:
                             model_exception = exc
                         model_future = None
-                        if exact_consumed:
-                            if model_result is not None and _is_model_fallback_candidate(
-                                model_result
-                            ):
-                                return _with_elapsed(
-                                    model_result,
-                                    start_time=start,
-                                    timeout_reached=True,
-                                )
-                            if model_exception is not None:
-                                raise model_exception
+                        if model_result is not None and _is_model_fallback_candidate(model_result):
+                            return _with_elapsed(
+                                model_result,
+                                start_time=start,
+                            )
+                        if exact_consumed and model_exception is not None:
+                            raise model_exception
 
                     now = time.perf_counter()
                     if not exact_consumed and now >= exact_deadline:
@@ -1686,7 +1729,6 @@ def select_move_with_model(
                             return _with_elapsed(
                                 model_result,
                                 start_time=start,
-                                timeout_reached=True,
                             )
                         if model_exception is not None:
                             raise model_exception

@@ -5,7 +5,7 @@
 `select_move_with_model(...)` は現在、
 
 - `empty_count <= exact_from_empty_threshold`
-  - exact と model を並列実行
+  - exact-only
 - `empty_count > exact_from_empty_threshold`
   - model のみ
 
@@ -39,7 +39,8 @@
 ## Phase 2: 実行条件の整理
 
 - `always_try_exact=False`
-  - 現行仕様を維持する
+  - `empty_count <= exact_from_empty_threshold` では exact-only
+  - `empty_count > exact_from_empty_threshold` では model のみ
 - `always_try_exact=True`
   - `empty_count > exact_from_empty_threshold`
     - exact / model を並列開始する
@@ -80,6 +81,7 @@
 - `always_try_exact=True` でも timeout は `timeout_seconds` を共有する
 - `exact_from_empty_threshold` は残す
   - `always_try_exact=False` 時の既定切替条件として使う
+- `empty_count <= exact_from_empty_threshold` では `always_try_exact` の値に関係なく exact-only で動作する
 - `always_try_exact=True` は `exact_from_empty_threshold` より優先する
   - `exact_from_empty_threshold=None` でも exact を並列開始する
 - terminal / 強制パス局面では `always_try_exact` を見ずに既存の終局/強制パス経路を優先する
@@ -94,14 +96,37 @@
   - 最終盤 exact-only 区間では成功時は常に `"exact"`
 - `timeout_reached` は timeout に達した場合のみ `True` にする
 
+## 実装結果
+
+- `always_try_exact` を
+  - module-level `select_move_with_model(...)`
+  - `Board.select_move_with_model(...)`
+  - `RecordedBoard.select_move_with_model(...)`
+  に追加した
+- `always_try_exact=False`
+  - `empty_count <= exact_from_empty_threshold` では exact-only
+  - `empty_count > exact_from_empty_threshold` では既存どおり model のみ
+- `always_try_exact=True`
+  - `empty_count > exact_from_empty_threshold` では exact / model を競走させ、先着した成功結果を返す
+  - `empty_count <= exact_from_empty_threshold` では exact-only で動作する
+- README / docstring / stub を更新した
+
 ## 受け入れ条件
 
-- [ ] `always_try_exact` が 3 経路の API に追加されている
-- [ ] `always_try_exact=False` で既存挙動が維持される
-- [ ] `always_try_exact=True` で `empty_count > exact_from_empty_threshold` の局面で exact / model を並列開始できる
-- [ ] `always_try_exact=True` で `empty_count <= exact_from_empty_threshold` の局面では exact-only で動作する
-- [ ] README / docstring / stub が更新されている
-- [ ] `make check` が成功する
+- [x] `always_try_exact` が 3 経路の API に追加されている
+- [x] `always_try_exact=False` で、閾値以下 exact-only / 閾値超え model-only の挙動になっている
+- [x] `always_try_exact=True` で `empty_count > exact_from_empty_threshold` の局面で exact / model を並列開始できる
+- [x] `always_try_exact=True` で `empty_count <= exact_from_empty_threshold` の局面では exact-only で動作する
+- [x] README / docstring / stub が更新されている
+- [x] `make check` が成功する
+
+## 検証
+
+- `uv run pytest -q src/test_python_api.py -k "select_move_with_model or search_best_move_exact"`
+  - `16 passed`
+- `make check`
+  - Rust `161 passed; 0 failed; 14 ignored`
+  - Python `73 passed`
 
 ## 懸念点
 

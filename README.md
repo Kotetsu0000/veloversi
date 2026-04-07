@@ -136,7 +136,7 @@ packed supervised example には、少なくとも次が含まれます。
 - `board.prepare_cnn_model_input()`
 - `board.prepare_flat_model_input()`
 - `board.search_best_move_exact(timeout_seconds=1.0, worker_count=None, serial_fallback_empty_threshold=18, shared_tt_empty_threshold=20)`
-- `board.select_move_with_model(model, depth=1, timeout_seconds=1.0, policy_mode="best", device="cpu", exact_from_empty_threshold=16)`
+- `board.select_move_with_model(model, depth=1, timeout_seconds=1.0, policy_mode="best", device="cpu", exact_from_empty_threshold=16, always_try_exact=False)`
 
 汎用 feature API:
 
@@ -254,6 +254,7 @@ result = board.select_move_with_model(
     policy_mode="best",
     device="cpu",
     exact_from_empty_threshold=16,
+    always_try_exact=False,
 )
 
 if result["success"]:
@@ -278,9 +279,14 @@ else:
 - `policy_mode="sample"`
   - 合法手上の確率分布からサンプリングします
 - 強制パス局面では model を呼ばず、着手なし結果を返します
-- `exact_from_empty_threshold` 以下の終盤では exact と model を並列に開始します
+- `exact_from_empty_threshold` 以下の終盤では exact-only で動作します
 - 制限時間内に exact が成功すれば exact を返します
-- exact が timeout / failure でも、model 側に結果があれば model を返します
+- exact が timeout / failure した場合は、その失敗結果を返します
+- `always_try_exact=True` の場合:
+  - `empty_count > exact_from_empty_threshold`
+    - exact / model を並列に開始し、先に成功結果を返した側を採用します
+  - `empty_count <= exact_from_empty_threshold`
+    - `always_try_exact` の値に関係なく exact-only で動作し、model fallback は行いません
 
 exact 探索の設定:
 
