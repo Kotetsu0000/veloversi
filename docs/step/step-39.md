@@ -25,9 +25,8 @@
 
 ## version 方針
 
-- このステップ中は `0.2.4` を維持する
-- 単体で release するなら次は `0.2.5`
-- ただし Step 37 とまとめる場合は version を後で再判断する
+- このステップ中は `0.2.5` を維持する
+- Step 38 とまとめて release する場合は `0.3.0` を推奨する
 
 ## このステップで行うこと
 
@@ -47,6 +46,7 @@
   - 反復深化で deadline まで掘る
 
 `search_mode="fixed"` を既定値にし、既存挙動を維持する。
+許容値は `"fixed"` と `"iterative"` の 2 つに固定し、それ以外は `ValueError` とする。
 
 `search_mode="iterative"` の場合のみ、
 
@@ -78,6 +78,14 @@
   - 合法手数が少ない手を優先
   - corner 優先
   - 自然順
+
+ordering の優先順は次で固定する。
+
+1. 前回 iteration の best move
+2. policy 出力がある場合は policy 降順
+3. corner
+4. 次局面の合法手数が少ない手
+5. 自然順
 
 ### Phase 4: exact との接続維持
 
@@ -131,6 +139,14 @@ exact/model 並列開始条件に入った場合、
   - timeout 時は「最後に完了した depth」の結果を返す
   - 途中 depth の partial subtree 結果は返却基準にしない
 - `always_try_exact` / `exact_from_empty_threshold` の規約は維持する
+- `search_mode` の許容値は `"fixed"` / `"iterative"` に固定する
+- root ordering の優先順は
+  - 前回 iteration の best move
+  - policy 降順
+  - corner
+  - 次局面の合法手数が少ない手
+  - 自然順
+  の順に固定する
 
 ## 受け入れ条件
 
@@ -164,6 +180,15 @@ exact/model 並列開始条件に入った場合、
   - 代わりに浅い depth を確実に積み上げる設計を優先する
   - この規約は iterative mode に限定し、fixed mode は現行仕様を維持する
 
+### `completed_depth` の返り値が曖昧になる
+
+- 懸念:
+  - fixed / iterative で返却 schema が変わると利用側が扱いづらい
+- 解決策:
+  - `completed_depth` は常に返す
+  - fixed mode では `None`
+  - iterative mode では最後に完了した深さを `int` で返す
+
 ### root ordering の quality が足りない
 
 - 懸念:
@@ -181,6 +206,15 @@ exact/model 並列開始条件に入った場合、
   - exact/model 並列の規約は変えず、model 側だけ iterative deepening 化する
   - timeout は共有し、exact が成功したらそちらを優先する
 
+### exact 並列時に iterative の途中結果を混ぜやすい
+
+- 懸念:
+  - `always_try_exact=True` では exact / model を並列で走らせるため、exact 成功時に model 側の途中結果を返してしまうと仕様が崩れる
+- 解決策:
+  - exact 成功時は常に exact を返す
+  - model iterative の結果は exact failure / timeout 時だけ採用する
+  - threshold 以下では従来どおり exact-only を維持する
+
 ### `search_mode` が policy 出力で曖昧になる
 
 - 懸念:
@@ -188,6 +222,29 @@ exact/model 並列開始条件に入った場合、
 - 解決策:
   - `search_mode` は value 出力経路にのみ適用する
   - policy 出力では現行の 1 回 forward を維持し、README / docstring で no-op であることを明記する
+
+### root ordering の実装が分岐しやすい
+
+- 懸念:
+  - fixed / iterative / torch / Rust model で root ordering を別々に書くと、挙動差と保守負荷が増える
+- 解決策:
+  - root ordering は専用 helper に切り出す
+  - 前回 iteration の best move
+  - policy 順
+  - cheap heuristic
+  を 1 箇所で扱う
+
+### テスト不足で iterative 専用仕様が壊れやすい
+
+- 懸念:
+  - 現在の timeout テストは fixed mode 前提で、iterative の返却規約や Rust model 経路を固定できていない
+- 解決策:
+  - 少なくとも次を追加する
+    - iterative で timeout 時に `completed_depth` が返る
+    - depth=1 すら完了しない場合は failure
+    - Rust value model でも iterative が動く
+    - `always_try_exact=True` + iterative で exact 勝ち / model 勝ち
+    - threshold 以下では iterative に行かず exact-only
 
 ### timeout は model の 1 回の forward 中には止められない
 
