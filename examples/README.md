@@ -96,3 +96,21 @@ uv run python examples/pytorch_dataloader.py
 ```bash
 uv run python examples/game_recording.py
 ```
+
+## `rust_value_model.py`
+
+PyTorch で学習した `state_dict` を Rust 推論用 `.vvm` に変換し、`RustValueModel` を使って着手選択する最小例です。
+
+- `vv.model.NNUE()`
+- `vv.export_model(...)`
+- `vv.load_model(...)`
+- `board.prepare_nnue_model_input()`
+- `board.select_move_with_model(rust_model, ...)`
+
+実行には PyTorch と `model_weights.pth` が必要です。
+
+構文確認:
+
+```bash
+uv run python -m py_compile examples/rust_value_model.py
+```

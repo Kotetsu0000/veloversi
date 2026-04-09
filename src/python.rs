@@ -15,13 +15,13 @@ use crate::{
 use crate::{ExactSearchConfig, ExactSearchFailureReason, SolveResult};
 #[cfg(not(any(test, coverage)))]
 use crate::{
-    FeatureConfig, FeaturePerspective, Move, PackedBoard, PackedSupervisedExample, RandomGameTrace,
-    RandomPlayConfig, SupervisedExample, append_game_record, encode_flat_features,
+    FeatureConfig, FeaturePerspective, Move, NnueValueModel, PackedBoard, PackedSupervisedExample,
+    RandomGameTrace, RandomPlayConfig, SupervisedExample, append_game_record, encode_flat_features,
     encode_flat_features_batch, encode_planes, encode_planes_batch, finish_game_recording,
-    load_game_records, pack_board, packed_supervised_examples_from_trace,
+    load_game_records, load_rust_value_model, pack_board, packed_supervised_examples_from_trace,
     packed_supervised_examples_from_traces, play_random_game, prepare_flat_learning_batch,
-    prepare_planes_learning_batch, random_start_board, record_move, record_pass,
-    sample_reachable_positions, start_game_recording, supervised_examples_from_trace,
+    prepare_nnue_model_input, prepare_planes_learning_batch, random_start_board, record_move,
+    record_pass, sample_reachable_positions, start_game_recording, supervised_examples_from_trace,
     supervised_examples_from_traces, unpack_board,
 };
 
@@ -29,6 +29,13 @@ use crate::{
 #[derive(Clone, Copy)]
 struct PyBoard {
     inner: Board,
+}
+
+#[cfg(not(any(test, coverage)))]
+#[pyclass(name = "RustValueModel")]
+#[derive(Clone)]
+struct PyRustValueModel {
+    inner: NnueValueModel,
 }
 
 fn color_to_py_str(color: Color) -> &'static str {
@@ -197,6 +204,9 @@ type PyPreparedFlatBatch<'py> = (
     Bound<'py, PyArray1<i16>>,
     Bound<'py, PyArray2<f32>>,
 );
+
+#[cfg(not(any(test, coverage)))]
+type PyNnueInput<'py> = Bound<'py, PyArray1<i32>>;
 
 #[cfg(not(any(test, coverage)))]
 type PyExactSearchParts = (
@@ -458,6 +468,34 @@ impl PyBoard {
             self.inner.black_bits,
             self.inner.white_bits,
             color_to_py_str(self.inner.side_to_move),
+        )
+    }
+}
+
+#[cfg(not(any(test, coverage)))]
+#[pymethods]
+impl PyRustValueModel {
+    fn evaluate_board(&self, board: &PyBoard) -> PyResult<f32> {
+        self.inner
+            .predict_board(&board.inner)
+            .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))
+    }
+
+    #[getter]
+    fn accumulator_dim(&self) -> usize {
+        self.inner.accumulator_dim()
+    }
+
+    #[getter]
+    fn hidden_dim(&self) -> usize {
+        self.inner.hidden_dim()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "RustValueModel(accumulator_dim={}, hidden_dim={})",
+            self.inner.accumulator_dim(),
+            self.inner.hidden_dim()
         )
     }
 }
@@ -998,6 +1036,26 @@ fn encode_flat_features_batch_parts_py<'py>(
     Ok(array.into_pyarray(py))
 }
 
+#[pyfunction(name = "_prepare_nnue_model_input_parts")]
+#[cfg(not(any(test, coverage)))]
+fn prepare_nnue_model_input_parts_py<'py>(
+    py: Python<'py>,
+    board: &PyBoard,
+) -> PyResult<PyNnueInput<'py>> {
+    let encoded = prepare_nnue_model_input(&board.inner);
+    let array = Array1::from_shape_vec(encoded.len, encoded.data_i32)
+        .expect("nnue input shape must be valid");
+    Ok(array.into_pyarray(py))
+}
+
+#[pyfunction(name = "_load_rust_value_model")]
+#[cfg(not(any(test, coverage)))]
+fn load_rust_value_model_py(path: &str) -> PyResult<PyRustValueModel> {
+    let inner = load_rust_value_model(path)
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+    Ok(PyRustValueModel { inner })
+}
+
 #[pyfunction(name = "_search_best_move_exact_parts")]
 #[cfg(not(any(test, coverage)))]
 fn search_best_move_exact_parts_py(
@@ -1127,6 +1185,8 @@ fn all_symmetries_py() -> Vec<&'static str> {
 #[pymodule]
 fn _core(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyBoard>()?;
+    #[cfg(not(any(test, coverage)))]
+    module.add_class::<PyRustValueModel>()?;
     module.add_function(wrap_pyfunction!(initial_board, module)?)?;
     module.add_function(wrap_pyfunction!(board_from_bits, module)?)?;
     #[cfg(not(any(test, coverage)))]
@@ -1195,6 +1255,10 @@ fn _core(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
         encode_flat_features_batch_parts_py,
         module
     )?)?;
+    #[cfg(not(any(test, coverage)))]
+    module.add_function(wrap_pyfunction!(prepare_nnue_model_input_parts_py, module)?)?;
+    #[cfg(not(any(test, coverage)))]
+    module.add_function(wrap_pyfunction!(load_rust_value_model_py, module)?)?;
     #[cfg(not(any(test, coverage)))]
     module.add_function(wrap_pyfunction!(search_best_move_exact_parts_py, module)?)?;
     module.add_function(wrap_pyfunction!(validate_board, module)?)?;

@@ -135,6 +135,7 @@ packed supervised example には、少なくとも次が含まれます。
 - `board.encode_flat_features(history, config)`
 - `board.prepare_cnn_model_input()`
 - `board.prepare_flat_model_input()`
+- `board.prepare_nnue_model_input()`
 - `board.search_best_move_exact(timeout_seconds=1.0, worker_count=None, serial_fallback_empty_threshold=18, shared_tt_empty_threshold=20)`
 - `board.select_move_with_model(model, depth=1, timeout_seconds=1.0, policy_mode="best", device="cpu", exact_from_empty_threshold=16, always_try_exact=False)`
 
@@ -169,6 +170,7 @@ shape:
 - `prepare_cnn_model_input_batch`
 - `prepare_flat_model_input`
 - `prepare_flat_model_input_batch`
+- `prepare_nnue_model_input`
 
 モデル入力 API は `Board` と `RecordedBoard` の両方を受けます。  
 `RecordedBoard` を渡した場合は現在局面を使います。
@@ -189,6 +191,14 @@ flat 用入力:
   - 相手の石 64
   - 合法手 64
 
+NNUE 用入力:
+
+- shape: `(B, 67)` または `(67,)`
+- dtype: `int32`
+- 内訳:
+  - ternary pattern index 64
+  - scalar bucket 3
+
 ## Recording / Game Record
 
 recording API:
@@ -202,6 +212,7 @@ recording API:
 - `RecordedBoard.encode_flat_features`
 - `RecordedBoard.prepare_cnn_model_input`
 - `RecordedBoard.prepare_flat_model_input`
+- `RecordedBoard.prepare_nnue_model_input`
 - `RecordedBoard.search_best_move_exact`
 - `RecordedBoard.select_move_with_model`
 - `RecordedBoard.to_dict`
@@ -238,13 +249,13 @@ else:
 
 `RecordedBoard.search_best_move_exact(...)` も同様に使えます。探索対象は常に `current_board` です。
 
-PyTorch model を使って着手を選びたい場合:
+モデルを使って着手を選びたい場合:
 
 ```python
 import torch
 import veloversi as vv
 
-model = ...  # torch.nn.Module
+model = ...  # torch.nn.Module または vv.load_model(...) の返り値
 board = vv.initial_board()
 
 result = board.select_move_with_model(
@@ -263,17 +274,19 @@ else:
     print(result["failure_reason"])
 ```
 
-この API は PyTorch を package dependency には含めません。`torch` が導入されている環境でのみ使えます。
+PyTorch `nn.Module` を使う経路では `torch` が必要です。Rust value model を使う経路では不要です。
 
 `select_move_with_model(...)` の挙動:
 
-- model は `torch.nn.Module` を受けます
+- model は `torch.nn.Module` または `RustValueModel` を受けます
 - 入力形式は自動判別します
   - CNN: `(1, 3, 8, 8)`
   - flat: `(1, 192)`
+- Rust value model では NNUE 入力 `(1, 67)` を使います
 - 出力形式も自動判別します
   - policy: `(64,)` または `(1, 64)`
   - value: scalar / `(1,)` / `(1, 1)`
+- Rust value model は value のみです
 - `policy_mode="best"`
   - 合法手の最大値を返します
 - `policy_mode="sample"`
@@ -287,6 +300,51 @@ else:
     - exact / model を並列に開始し、先に成功結果を返した側を採用します
   - `empty_count <= exact_from_empty_threshold`
     - `always_try_exact` の値に関係なく exact-only で動作し、model fallback は行いません
+
+## Rust Value Model
+
+PyTorch で学習し、Rust 側で高速推論する value model 導線があります。
+
+学習側:
+
+```python
+import torch
+import veloversi as vv
+
+model = vv.model.NNUE()
+state_dict = torch.load("model_weights.pth", map_location="cpu")
+model.load_state_dict(state_dict)
+```
+
+変換:
+
+```python
+import veloversi as vv
+
+vv.export_model("model_weights.pth", "model_weights.vvm")
+```
+
+推論側:
+
+```python
+import veloversi as vv
+
+vv_model = vv.load_model("model_weights.vvm")
+board = vv.initial_board()
+
+result = board.select_move_with_model(
+    vv_model,
+    depth=2,
+    timeout_seconds=1.0,
+    exact_from_empty_threshold=16,
+)
+```
+
+補足:
+
+- `vv.model.NNUE()` と `vv.export_model(...)` は `torch` が必要です
+- `vv.load_model(...)` と Rust value model の推論は `torch` 不要です
+- `device` 引数は Rust value model では無視されます
 
 exact 探索の設定:
 

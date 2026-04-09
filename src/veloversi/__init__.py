@@ -1,6 +1,7 @@
 from bisect import bisect_right
 import concurrent.futures
 import importlib
+import json
 from pathlib import Path
 import time
 from typing import Any, cast, overload
@@ -18,6 +19,8 @@ from ._core import (
     _packed_supervised_examples_from_trace_parts,
     _packed_supervised_examples_from_traces_parts,
     _prepare_flat_learning_batch_parts,
+    _load_rust_value_model,
+    _prepare_nnue_model_input_parts,
     _prepare_planes_learning_batch_parts,
     _play_random_game_parts,
     _random_start_board_parts,
@@ -30,6 +33,7 @@ from ._core import (
     _supervised_examples_from_traces_parts,
     _unpack_board_parts,
     Board as _CoreBoard,
+    RustValueModel as _CoreRustValueModel,
     all_symmetries,
     apply_move as _apply_move_core,
     apply_forced_pass as _apply_forced_pass_core,
@@ -49,10 +53,13 @@ from ._core import (
 )
 
 Board = _CoreBoard
+RustValueModel = _CoreRustValueModel
+model: Any
 
 __all__ = [
     "Board",
     "RecordedBoard",
+    "RustValueModel",
     "initial_board",
     "board_from_bits",
     "all_symmetries",
@@ -93,12 +100,24 @@ __all__ = [
     "prepare_cnn_model_input_batch",
     "prepare_flat_model_input",
     "prepare_flat_model_input_batch",
+    "prepare_nnue_model_input",
     "unpack_board",
     "transform_board",
     "transform_square",
     "search_best_move_exact",
     "select_move_with_model",
+    "load_model",
+    "export_model",
+    "model",
 ]
+
+
+def __getattr__(name: str) -> object:
+    if name == "model":
+        imported = importlib.import_module(f"{__name__}.model")
+        globals()["model"] = imported
+        return imported
+    raise AttributeError(name)
 
 
 def _validate_optional_u16(value: object, name: str) -> int | None:
@@ -320,6 +339,10 @@ class RecordedBoard:
         """現在局面を flat/NNUE 風 `(1, 192)` 入力に変換します。"""
         return prepare_flat_model_input(self)
 
+    def prepare_nnue_model_input(self) -> np.ndarray:
+        """現在局面を NNUE 向け `(1, 67)` 整数入力に変換します。"""
+        return prepare_nnue_model_input(self)
+
     def search_best_move_exact(
         self,
         timeout_seconds: float = 1.0,
@@ -519,6 +542,11 @@ class RecordDataset:
         """通し番号で 1 局面の `(192,)` flat 入力を返します。"""
         board = cast(Board, self.get(global_index)["board"])
         return board.prepare_flat_model_input()[0]
+
+    def get_nnue_input(self, global_index: int) -> np.ndarray:
+        """通し番号で 1 局面の `(67,)` NNUE 整数入力を返します。"""
+        board = cast(Board, self.get(global_index)["board"])
+        return board.prepare_nnue_model_input()[0]
 
     def get_targets(self, global_index: int) -> dict[str, object]:
         """通し番号で 1 局面の教師データを返します。
@@ -797,6 +825,11 @@ def _board_prepare_flat_model_input(self: Board) -> np.ndarray:
     return prepare_flat_model_input(self)
 
 
+def _board_prepare_nnue_model_input(self: Board) -> np.ndarray:
+    """盤面を NNUE 向け `(1, 67)` 整数入力に変換します。"""
+    return prepare_nnue_model_input(self)
+
+
 def _board_search_best_move_exact(
     self: Board,
     timeout_seconds: float = 1.0,
@@ -856,6 +889,7 @@ Board.encode_planes = _board_encode_planes  # type: ignore[attr-defined]
 Board.encode_flat_features = _board_encode_flat_features  # type: ignore[attr-defined]
 Board.prepare_cnn_model_input = _board_prepare_cnn_model_input  # type: ignore[attr-defined]
 Board.prepare_flat_model_input = _board_prepare_flat_model_input  # type: ignore[attr-defined]
+Board.prepare_nnue_model_input = _board_prepare_nnue_model_input  # type: ignore[attr-defined]
 Board.search_best_move_exact = _board_search_best_move_exact  # type: ignore[attr-defined]
 Board.select_move_with_model = _board_select_move_with_model  # type: ignore[attr-defined]
 
@@ -1060,6 +1094,119 @@ def prepare_flat_model_input_batch(values: list[object]) -> np.ndarray:
     )
 
 
+def prepare_nnue_model_input(board_or_record: object) -> np.ndarray:
+    """現在局面から NNUE 向け `(1, 67)` 整数入力を作ります。"""
+    board = _board_from_board_or_record(board_or_record)
+    return _prepare_nnue_model_input_parts(board)[np.newaxis, ...]
+
+
+def load_model(path: str | Path) -> RustValueModel:
+    """Rust 側で高速推論する value model を読み込みます。
+
+    Args:
+        path: `export_model(...)` が出力した `.vvm` ファイル。
+    """
+    return _load_rust_value_model(str(_validate_model_path(path, name="path")))
+
+
+def export_model(pth_path: str | Path, vvm_path: str | Path) -> None:
+    """PyTorch `state_dict` を Rust 推論用 `.vvm` へ変換します。
+
+    Args:
+        pth_path: `torch.save(model.state_dict(), ...)` で保存した重みファイル。
+        vvm_path: Rust 推論用に出力する `.vvm` ファイル。
+    """
+    source_path = _validate_model_path(pth_path, name="pth_path")
+    target_path = _validate_model_path(vvm_path, name="vvm_path")
+    try:
+        torch_module = _import_torch()
+    except RuntimeError as exc:
+        raise RuntimeError("export_model を使うには PyTorch (`torch`) の導入が必要です") from exc
+
+    model_module = cast(Any, __getattr__("model"))
+    nnue_model = model_module.NNUE()
+    state_dict = _load_state_dict_for_export(torch_module, source_path)
+    nnue_model.load_state_dict(state_dict, strict=True)
+    nnue_model.eval()
+    exported_state = nnue_model.state_dict()
+
+    pattern_tables: list[dict[str, object]] = []
+    for family in range(model_module.NNUE_PATTERN_FAMILIES):
+        weight = _tensor_to_numpy_float32(
+            exported_state[f"pattern_tables.{family}.weight"],
+            name=f"pattern_tables.{family}.weight",
+        )
+        scale, values = _quantize_to_int8(weight)
+        pattern_tables.append(
+            {
+                "rows": int(weight.shape[0]),
+                "cols": int(weight.shape[1]),
+                "scale": scale,
+                "values": values,
+            }
+        )
+
+    scalar_tables: list[dict[str, object]] = []
+    for scalar_slot in range(model_module.NNUE_SCALAR_SLOTS):
+        weight = _tensor_to_numpy_float32(
+            exported_state[f"scalar_tables.{scalar_slot}.weight"],
+            name=f"scalar_tables.{scalar_slot}.weight",
+        )
+        scale, values = _quantize_to_int8(weight)
+        scalar_tables.append(
+            {
+                "rows": int(weight.shape[0]),
+                "cols": int(weight.shape[1]),
+                "scale": scale,
+                "values": values,
+            }
+        )
+
+    fc1_weight = _tensor_to_numpy_float32(exported_state["fc1.weight"], name="fc1.weight")
+    fc1_scale, fc1_values = _quantize_to_int8(fc1_weight)
+    fc2_weight = _tensor_to_numpy_float32(exported_state["fc2.weight"], name="fc2.weight")
+    fc2_scale, fc2_values = _quantize_to_int8(fc2_weight)
+
+    payload = {
+        "format": model_module.NNUE_FORMAT,
+        "version": model_module.NNUE_VERSION,
+        "architecture": model_module.NNUE_ARCHITECTURE,
+        "input_len": model_module.NNUE_INPUT_LEN,
+        "accumulator_dim": model_module.NNUE_ACCUMULATOR_DIM,
+        "hidden_dim": model_module.NNUE_HIDDEN_DIM,
+        "pattern_family_sizes": list(model_module.NNUE_PATTERN_FAMILY_SIZES),
+        "scalar_bucket_sizes": list(model_module.NNUE_SCALAR_BUCKET_SIZES),
+        "pattern_tables": pattern_tables,
+        "scalar_tables": scalar_tables,
+        "accumulator_bias": _tensor_to_numpy_float32(
+            exported_state["accumulator_bias"], name="accumulator_bias"
+        )
+        .reshape(-1)
+        .tolist(),
+        "fc1": {
+            "out_dim": int(fc1_weight.shape[0]),
+            "in_dim": int(fc1_weight.shape[1]),
+            "scale": fc1_scale,
+            "weights": fc1_values,
+            "bias": _tensor_to_numpy_float32(exported_state["fc1.bias"], name="fc1.bias")
+            .reshape(-1)
+            .tolist(),
+        },
+        "fc2": {
+            "out_dim": int(fc2_weight.shape[0]),
+            "in_dim": int(fc2_weight.shape[1]),
+            "scale": fc2_scale,
+            "weights": fc2_values,
+            "bias": _tensor_to_numpy_float32(exported_state["fc2.bias"], name="fc2.bias")
+            .reshape(-1)
+            .tolist(),
+        },
+    }
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_text(json.dumps(payload), encoding="utf-8")
+
+
 def search_best_move_exact(
     board_or_record: object,
     timeout_seconds: float = 1.0,
@@ -1170,6 +1317,16 @@ def _validate_always_try_exact(value: object) -> bool:
     return cast(bool, value)
 
 
+def _is_rust_value_model(model: object) -> bool:
+    return isinstance(model, RustValueModel)
+
+
+def _validate_model_path(path: object, *, name: str) -> Path:
+    if not isinstance(path, (str, Path)):
+        raise TypeError(f"{name} must be a str or Path")
+    return Path(path)
+
+
 def _validate_torch_model(model: object, torch_module: object) -> None:
     nn_module = getattr(getattr(torch_module, "nn", None), "Module", None)
     if nn_module is None or not isinstance(model, nn_module):
@@ -1225,6 +1382,46 @@ def _run_model_once(
     tensor = _torch_tensor_from_numpy(torch_module, input_array, device)
     output = cast(Any, model)(tensor)
     return _classify_model_output(output)
+
+
+def _normalize_state_dict_keys(state_dict: object) -> dict[str, object]:
+    if type(state_dict) is not dict:
+        raise ValueError("export_model expects a state_dict dict saved by torch.save")
+    normalized = cast(dict[object, object], state_dict)
+    if all(type(key) is str and str(key).startswith("module.") for key in normalized):
+        return {str(key)[7:]: value for key, value in normalized.items()}
+    if any(type(key) is str and str(key).startswith("module.") for key in normalized):
+        raise ValueError(
+            "mixed state_dict keys with and without 'module.' prefix are not supported"
+        )
+    if not all(type(key) is str for key in normalized):
+        raise ValueError("state_dict keys must be str")
+    return {cast(str, key): value for key, value in normalized.items()}
+
+
+def _load_state_dict_for_export(torch_module: object, path: Path) -> dict[str, object]:
+    torch_load = getattr(torch_module, "load")
+    try:
+        state_dict = torch_load(path, map_location="cpu", weights_only=True)
+    except TypeError:
+        state_dict = torch_load(path, map_location="cpu")
+    return _normalize_state_dict_keys(state_dict)
+
+
+def _quantize_to_int8(array: np.ndarray) -> tuple[float, list[int]]:
+    max_abs = float(np.max(np.abs(array), initial=0.0))
+    scale = max_abs / 127.0 if max_abs > 0.0 else 1.0
+    quantized = np.clip(np.rint(array / scale), -127, 127).astype(np.int8, copy=False)
+    return scale, quantized.reshape(-1).tolist()
+
+
+def _tensor_to_numpy_float32(tensor: object, *, name: str) -> np.ndarray:
+    array = _torch_output_to_numpy(tensor)
+    if array.dtype != np.float32:
+        array = array.astype(np.float32, copy=False)
+    if not np.all(np.isfinite(array)):
+        raise ValueError(f"{name} must contain only finite float values")
+    return array
 
 
 def _detect_model_io(
@@ -1506,58 +1703,98 @@ def _run_model_selection_path(
             )
             return float(cast(np.float32, value_output))
 
-        searched_nodes = [0]
-        legal_moves = board.legal_moves_list()
-        best_move: int | None = None
-        best_value = -float("inf")
-        best_pv: list[int] = []
-        timeout_reached = False
+        return _run_value_search_path(
+            board=board,
+            depth=depth,
+            deadline=deadline,
+            evaluate_position=evaluate_position,
+            start_time=start_time,
+            input_format=input_format,
+        )
 
-        for move in legal_moves:
-            if time.perf_counter() >= deadline:
-                timeout_reached = True
-                break
-            try:
-                child_value, child_pv = _value_search_negamax(
-                    board.apply_move(move),
-                    depth - 1,
-                    deadline,
-                    evaluate_position,
-                    searched_nodes,
-                    -float("inf"),
-                    float("inf"),
-                )
-            except _ModelSearchTimeout:
-                timeout_reached = True
-                break
-            score = -child_value
-            if score > best_value:
-                best_value = score
-                best_move = move
-                best_pv = [move, *child_pv]
 
-        elapsed = time.perf_counter() - start_time
-        if best_move is None:
-            return _failure_result(
-                elapsed_seconds=elapsed,
-                failure_reason="timeout" if timeout_reached else "no_legal_moves",
-                input_format=input_format,
-                output_format="value",
-                source="value_search",
-                searched_nodes=searched_nodes[0],
-                timeout_reached=timeout_reached,
+def _run_value_search_path(
+    *,
+    board: Board,
+    depth: int,
+    deadline: float,
+    evaluate_position: object,
+    start_time: float,
+    input_format: str,
+) -> dict[str, object]:
+    searched_nodes = [0]
+    legal_moves = board.legal_moves_list()
+    best_move: int | None = None
+    best_value = -float("inf")
+    best_pv: list[int] = []
+    timeout_reached = False
+
+    for move in legal_moves:
+        if time.perf_counter() >= deadline:
+            timeout_reached = True
+            break
+        try:
+            child_value, child_pv = _value_search_negamax(
+                board.apply_move(move),
+                depth - 1,
+                deadline,
+                evaluate_position,
+                searched_nodes,
+                -float("inf"),
+                float("inf"),
             )
-        return _success_result(
-            best_move=best_move,
+        except _ModelSearchTimeout:
+            timeout_reached = True
+            break
+        score = -child_value
+        if score > best_value:
+            best_value = score
+            best_move = move
+            best_pv = [move, *child_pv]
+
+    elapsed = time.perf_counter() - start_time
+    if best_move is None:
+        return _failure_result(
             elapsed_seconds=elapsed,
+            failure_reason="timeout" if timeout_reached else "no_legal_moves",
             input_format=input_format,
             output_format="value",
             source="value_search",
-            pv=best_pv,
             searched_nodes=searched_nodes[0],
-            value=float(best_value),
             timeout_reached=timeout_reached,
         )
+    return _success_result(
+        best_move=best_move,
+        elapsed_seconds=elapsed,
+        input_format=input_format,
+        output_format="value",
+        source="value_search",
+        pv=best_pv,
+        searched_nodes=searched_nodes[0],
+        value=float(best_value),
+        timeout_reached=timeout_reached,
+    )
+
+
+def _run_rust_model_selection_path(
+    *,
+    board: Board,
+    model: RustValueModel,
+    depth: int,
+    deadline: float,
+    start_time: float,
+) -> dict[str, object]:
+    def evaluate_position(current_board: Board) -> float:
+        return float(model.evaluate_board(current_board))
+
+    return _run_value_search_path(
+        board=board,
+        depth=depth,
+        deadline=deadline,
+        evaluate_position=evaluate_position,
+        start_time=start_time,
+        input_format="nnue",
+    )
 
 
 def select_move_with_model(
@@ -1571,15 +1808,15 @@ def select_move_with_model(
     exact_from_empty_threshold: int | None = 16,
     always_try_exact: bool = False,
 ) -> dict[str, object]:
-    """PyTorch model を使って着手を選びます。
+    """モデルを使って着手を選びます。
 
     Args:
         board_or_record: `Board` または `RecordedBoard`。
-        model: PyTorch `nn.Module`。
+        model: PyTorch `nn.Module` または `RustValueModel`。
         depth: value 出力時の探索深さ。既定値は `1`。
         timeout_seconds: 探索全体の制限時間。
         policy_mode: `\"best\"` または `\"sample\"`。
-        device: 推論に使う device。既定値は `\"cpu\"`。
+        device: PyTorch 推論に使う device。Rust model では無視されます。
         exact_from_empty_threshold:
             空き数がこの値以下なら exact 探索を優先します。
             `None` の場合は exact へ切り替えません。
@@ -1615,8 +1852,15 @@ def select_move_with_model(
     validated_always_try_exact = _validate_always_try_exact(always_try_exact)
 
     start = time.perf_counter()
-    torch_module = _import_torch()
-    _validate_torch_model(model, torch_module)
+    is_rust_model = _is_rust_value_model(model)
+    torch_module: object | None = None
+    was_training = False
+    if not is_rust_model:
+        torch_module = _import_torch()
+        _validate_torch_model(model, torch_module)
+        was_training = bool(getattr(model, "training", False))
+        if hasattr(model, "eval"):
+            cast(Any, model).eval()
 
     status = board.board_status()
     if status == "terminal":
@@ -1642,9 +1886,6 @@ def select_move_with_model(
 
     overall_deadline = start + timeout_value
     exact_deadline = overall_deadline
-    was_training = bool(getattr(model, "training", False))
-    if hasattr(model, "eval"):
-        cast(Any, model).eval()
     try:
         empty_count = disc_count(board)[2]
         should_use_default_exact = exact_threshold is not None and empty_count <= exact_threshold
@@ -1661,6 +1902,30 @@ def select_move_with_model(
                 elapsed_seconds=elapsed_seconds,
             )
 
+        if is_rust_model:
+
+            def selection_runner() -> dict[str, object]:
+                return _run_rust_model_selection_path(
+                    board=board,
+                    model=cast(RustValueModel, model),
+                    depth=validated_depth,
+                    deadline=overall_deadline,
+                    start_time=start,
+                )
+        else:
+
+            def selection_runner() -> dict[str, object]:
+                return _run_model_selection_path(
+                    board=board,
+                    model=model,
+                    depth=validated_depth,
+                    deadline=overall_deadline,
+                    policy_mode=validated_policy_mode,
+                    device=validated_device,
+                    torch_module=cast(object, torch_module),
+                    start_time=start,
+                )
+
         if validated_always_try_exact:
             model_result: dict[str, object] | None = None
             model_exception: BaseException | None = None
@@ -1676,17 +1941,7 @@ def select_move_with_model(
                 else:
                     exact_consumed = True
 
-                model_future = executor.submit(
-                    _run_model_selection_path,
-                    board=board,
-                    model=model,
-                    depth=validated_depth,
-                    deadline=overall_deadline,
-                    policy_mode=validated_policy_mode,
-                    device=validated_device,
-                    torch_module=torch_module,
-                    start_time=start,
-                )
+                model_future = executor.submit(selection_runner)
 
                 while True:
                     now = time.perf_counter()
@@ -1780,18 +2035,9 @@ def select_move_with_model(
             finally:
                 executor.shutdown(wait=False, cancel_futures=True)
 
-        return _run_model_selection_path(
-            board=board,
-            model=model,
-            depth=validated_depth,
-            deadline=overall_deadline,
-            policy_mode=validated_policy_mode,
-            device=validated_device,
-            torch_module=torch_module,
-            start_time=start,
-        )
+        return selection_runner()
     finally:
-        if hasattr(model, "train"):
+        if not is_rust_model and hasattr(model, "train"):
             cast(Any, model).train(was_training)
 
 

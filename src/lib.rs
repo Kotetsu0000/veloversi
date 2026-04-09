@@ -2,6 +2,7 @@ pub mod engine;
 mod feature;
 mod flip_tables;
 mod learning;
+mod nnue;
 mod python;
 mod random_play;
 mod recording;
@@ -23,6 +24,11 @@ pub use feature::{
 pub use learning::{
     LearningBatchError, PreparedFlatBatch, PreparedPlanesBatch, prepare_flat_learning_batch,
     prepare_planes_learning_batch,
+};
+pub use nnue::{
+    EncodedNnueInput, NNUE_ACCUMULATOR_DIM, NNUE_ARCHITECTURE, NNUE_FORMAT, NNUE_HIDDEN_DIM,
+    NNUE_INPUT_LEN, NNUE_PATTERN_FAMILIES, NNUE_PATTERN_SLOTS, NNUE_SCALAR_SLOTS, NnueModelError,
+    NnueValueModel, load_rust_value_model, prepare_nnue_model_input,
 };
 pub use random_play::{
     PackedSupervisedExample, PositionSamplingConfig, RandomGameTrace, RandomPlayConfig,

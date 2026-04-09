@@ -43,12 +43,15 @@ from veloversi import (
     finish_game_recording,
     append_game_record,
     current_board,
+    export_model,
     prepare_flat_learning_batch,
     prepare_flat_model_input,
     prepare_flat_model_input_batch,
+    prepare_nnue_model_input,
     prepare_planes_learning_batch,
     sample_reachable_positions,
     select_move_with_model,
+    load_model,
     supervised_examples_from_trace,
     supervised_examples_from_traces,
     transform_board,
@@ -139,6 +142,20 @@ class _FlatValueModel(_FakeModule):
 class _AmbiguousModel(_FakeModule):
     def forward(self, tensor: _FakeTensor) -> _FakeTensor:
         return _FakeTensor(np.asarray([0.0], dtype=np.float32))
+
+
+class _FakeRustModel:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.accumulator_dim = 32
+        self.hidden_dim = 16
+
+    def evaluate_board(self, board: Board) -> float:
+        self.calls += 1
+        features = board.prepare_flat_model_input()[0]
+        opp = features[64:128]
+        weights = np.arange(64, dtype=np.float32)
+        return -float(np.dot(opp, weights) / max(np.sum(opp), 1.0) / 63.0)
 
 
 def _fake_torch_module() -> object:
@@ -253,6 +270,23 @@ def test_board_extended_method_style_api_matches_module_level_helpers() -> None:
     )
     assert np.array_equal(board.prepare_cnn_model_input(), prepare_cnn_model_input(board))
     assert np.array_equal(board.prepare_flat_model_input(), prepare_flat_model_input(board))
+
+
+def test_prepare_nnue_model_input_matches_board_record_and_dataset(tmp_path: Path) -> None:
+    board = board_from_bits(0xFFFF_FFFF_FFFF_FF7E, 0x0000_0000_0000_0080, "white")
+    record = start_game_recording(board)
+    path = tmp_path / "nnue-games.jsonl"
+
+    finished = finish_game_recording(record.apply_move(0))
+    append_game_record(str(path), finished)
+    dataset = open_game_record_dataset(path)
+
+    expected = prepare_nnue_model_input(board)
+    assert expected.shape == (1, 67)
+    assert expected.dtype == np.int32
+    assert np.array_equal(board.prepare_nnue_model_input(), expected)
+    assert np.array_equal(record.prepare_nnue_model_input(), expected)
+    assert np.array_equal(dataset.get_nnue_input(0), expected[0])
 
 
 def test_step10_python_public_surface_matches_policy() -> None:
@@ -739,6 +773,57 @@ def test_select_move_with_model_requires_torch(monkeypatch: pytest.MonkeyPatch) 
 
     with pytest.raises(RuntimeError, match="PyTorch"):
         select_move_with_model(initial_board(), object())
+
+
+def test_export_model_requires_torch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def _raise_missing_torch() -> object:
+        raise RuntimeError("select_move_with_model を使うには PyTorch (`torch`) の導入が必要です")
+
+    monkeypatch.setattr(veloversi, "_import_torch", _raise_missing_torch)
+
+    with pytest.raises(RuntimeError, match="export_model"):
+        export_model(tmp_path / "weights.pth", tmp_path / "weights.vvm")
+
+
+def test_veloversi_model_nnue_requires_torch() -> None:
+    with pytest.raises(RuntimeError, match="veloversi.model"):
+        veloversi.model.NNUE()
+
+
+def test_load_model_uses_core_loader(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    sentinel = object()
+    calls: list[str] = []
+
+    def _fake_loader(path: str) -> object:
+        calls.append(path)
+        return sentinel
+
+    monkeypatch.setattr(veloversi, "_load_rust_value_model", _fake_loader)
+
+    result = load_model(tmp_path / "weights.vvm")
+
+    assert result is sentinel
+    assert calls == [str(tmp_path / "weights.vvm")]
+
+
+def test_select_move_with_rust_value_model_does_not_require_torch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _unexpected_torch() -> object:
+        raise AssertionError("torch import should not run for RustValueModel")
+
+    monkeypatch.setattr(veloversi, "_import_torch", _unexpected_torch)
+    monkeypatch.setattr(veloversi, "RustValueModel", _FakeRustModel)
+    model = _FakeRustModel()
+
+    result = select_move_with_model(initial_board(), model, depth=1)
+
+    assert result["success"] is True
+    assert result["input_format"] == "nnue"
+    assert result["output_format"] == "value"
+    assert result["source"] == "value_search"
+    assert result["best_move"] == 44
+    assert model.calls >= 4
 
 
 def test_select_move_with_model_policy_cnn_supports_board_and_record(

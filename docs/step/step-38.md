@@ -188,12 +188,12 @@ PyTorch で学習しつつ、実運用では Rust 側で高速推論できる va
 
 ## 固定した前提
 
-- 入力は flat `(1, 192)` / `(B, 192)`
+- 入力は専用 NNUE flat `(1, 67)` / `(67,)`
 - 出力は value のみ
 - value は現在手番視点
 - Rust 推論器は PyTorch `state_dict` 互換の固定 key/shape を前提にする
 - `torch` は package dependency にしない
-- `load_model(...)` と `veloversi.model` 利用時のみ optional runtime import する
+- `veloversi.model` と `export_model(...)` 利用時のみ optional runtime import する
 - `export_model(...)` は CPU 読み込みを前提にする
   - GPU 保存済み `state_dict` でも `map_location="cpu"` で読む
 - Step 38 第1版の Rust 推論モデルは `int8` 重みを前提にする
@@ -216,17 +216,20 @@ PyTorch で学習しつつ、実運用では Rust 側で高速推論できる va
 - export は「PyTorch 学習モデル -> Rust 推論モデルへの変換フェーズ」として扱う
 - 圧倒的な高速演算を優先し、PyTorch 側の都合より Rust 側の推論効率を設計の主軸にする
 - 専用 flat 特徴は `Board` / `RecordedBoard` / `RecordDataset` から同系統の API 名で取得できるようにする
+- pattern embedding table は 64 slot ごとではなく 16 family 共有にする
+  - 64 slot は family table を参照して加算する
+  - これにより学習時のメモリ使用量を抑える
 
 ## 受け入れ条件
 
-- [ ] `vv.model.NNUE()` が学習用の PyTorch モデル定義として使える
-- [ ] `vv.export_model("model_weights.pth", "model_weights.vvm")` で Rust 推論用形式へ変換できる
-- [ ] `vv.load_model("model_weights.vvm")` で Rust 推論モデルを読み込める
-- [ ] 専用 flat 特徴を `Board` / `RecordedBoard` / `RecordDataset` から取得できる
-- [ ] Rust 推論モデルを `select_move_with_model(...)` に渡せる
+- [x] `vv.model.NNUE()` が学習用の PyTorch モデル定義として使える
+- [x] `vv.export_model("model_weights.pth", "model_weights.vvm")` で Rust 推論用形式へ変換できる
+- [x] `vv.load_model("model_weights.vvm")` で Rust 推論モデルを読み込める
+- [x] 専用 flat 特徴を `Board` / `RecordedBoard` / `RecordDataset` から取得できる
+- [x] Rust 推論モデルを `select_move_with_model(...)` に渡せる
 - [ ] Python/Torch 推論と Rust 推論で同じ重みに対して近い value が出る
-- [ ] README / examples / stub が更新されている
-- [ ] `make check` が成功する
+- [x] README / examples / stub が更新されている
+- [x] `make check` が成功する
 
 ## 懸念点
 
