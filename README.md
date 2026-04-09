@@ -263,6 +263,7 @@ result = board.select_move_with_model(
     depth=1,
     timeout_seconds=1.0,
     policy_mode="best",
+    search_mode="fixed",
     device="cpu",
     exact_from_empty_threshold=16,
     always_try_exact=False,
@@ -291,6 +292,11 @@ PyTorch `nn.Module` を使う経路では `torch` が必要です。Rust value m
   - 合法手の最大値を返します
 - `policy_mode="sample"`
   - 合法手上の確率分布からサンプリングします
+- `search_mode="fixed"`
+  - value 出力時に固定深さで探索します
+- `search_mode="iterative"`
+  - value 出力時に 1..depth の反復深化で探索します
+  - timeout 時は最後に完了した深さの結果を返します
 - 強制パス局面では model を呼ばず、着手なし結果を返します
 - `exact_from_empty_threshold` 以下の終盤では exact-only で動作します
 - 制限時間内に exact が成功すれば exact を返します
@@ -300,6 +306,9 @@ PyTorch `nn.Module` を使う経路では `torch` が必要です。Rust value m
     - exact / model を並列に開始し、先に成功結果を返した側を採用します
   - `empty_count <= exact_from_empty_threshold`
     - `always_try_exact` の値に関係なく exact-only で動作し、model fallback は行いません
+- 返り値の `completed_depth`
+  - fixed / policy / exact では `None`
+  - iterative では最後に完了した深さです
 
 ## Rust Value Model
 

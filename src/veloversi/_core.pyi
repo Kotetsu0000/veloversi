@@ -41,6 +41,7 @@ class Board:
         timeout_seconds: float = 1.0,
         *,
         policy_mode: str = "best",
+        search_mode: str = "fixed",
         device: str = "cpu",
         exact_from_empty_threshold: int | None = 16,
         always_try_exact: bool = False,

@@ -150,15 +150,15 @@ exact/model 並列開始条件に入った場合、
 
 ## 受け入れ条件
 
-- [ ] value 探索に fixed / iterative の mode が追加されている
-- [ ] 既定値は fixed で、既存挙動を維持している
-- [ ] `search_mode="iterative"` で iterative deepening が動作する
-- [ ] `search_mode="iterative"` の timeout 時に最後に完了した depth の結果を返す
-- [ ] iterative result に `completed_depth` が含まれる
-- [ ] 前回 iteration の最善手を次 iteration の ordering に再利用している
-- [ ] exact/model 並列 fallback の既存仕様を壊していない
-- [ ] README / docstring / stub が更新されている
-- [ ] `make check` が成功する
+- [x] value 探索に fixed / iterative の mode が追加されている
+- [x] 既定値は fixed で、既存挙動を維持している
+- [x] `search_mode="iterative"` で iterative deepening が動作する
+- [x] `search_mode="iterative"` の timeout 時に最後に完了した depth の結果を返す
+- [x] iterative result に `completed_depth` が含まれる
+- [x] 前回 iteration の最善手を次 iteration の ordering に再利用している
+- [x] exact/model 並列 fallback の既存仕様を壊していない
+- [x] README / docstring / stub が更新されている
+- [x] `make check` が成功する
 
 ## 懸念点
 

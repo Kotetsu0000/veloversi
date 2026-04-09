@@ -158,6 +158,11 @@ class _FakeRustModel:
         return -float(np.dot(opp, weights) / max(np.sum(opp), 1.0) / 63.0)
 
 
+def _initial_move_by_child_bits() -> dict[tuple[int, int, str], int]:
+    board = initial_board()
+    return {board.apply_move(move).to_bits(): move for move in board.legal_moves_list()}
+
+
 def _fake_torch_module() -> object:
     return SimpleNamespace(
         nn=SimpleNamespace(Module=_FakeModule),
@@ -823,6 +828,7 @@ def test_select_move_with_rust_value_model_does_not_require_torch(
     assert result["output_format"] == "value"
     assert result["source"] == "value_search"
     assert result["best_move"] == 44
+    assert result["completed_depth"] is None
     assert model.calls >= 4
 
 
@@ -845,6 +851,7 @@ def test_select_move_with_model_policy_cnn_supports_board_and_record(
         assert candidate["source"] == "policy"
         assert candidate["forced_pass"] is False
         assert candidate["timeout_reached"] is False
+        assert candidate["completed_depth"] is None
         assert cast(np.ndarray, candidate["policy"]).shape == (64,)
         assert cast(float, candidate["selected_probability"]) > 0.0
 
@@ -882,6 +889,7 @@ def test_select_move_with_model_value_flat_search_and_partial_timeout(
     assert result["output_format"] == "value"
     assert result["source"] == "value_search"
     assert result["timeout_reached"] is False
+    assert result["completed_depth"] is None
     assert cast(float, result["value"]) > 0.0
     assert cast(int, result["searched_nodes"]) >= 4
     assert model.training is True
@@ -892,6 +900,7 @@ def test_select_move_with_model_value_flat_search_and_partial_timeout(
 
     assert timeout_result["success"] is True
     assert timeout_result["timeout_reached"] is True
+    assert timeout_result["completed_depth"] is None
     assert timeout_result["best_move"] in {19, 26}
     assert timeout_result["source"] == "value_search"
 
@@ -937,6 +946,7 @@ def test_select_move_with_model_uses_exact_fallback_and_prefers_exact_result(
     assert result["source"] == "exact"
     assert result["exact_margin"] == -48
     assert result["value"] == pytest.approx(-48.0 / 64.0)
+    assert result["completed_depth"] is None
     assert model.calls >= 0
 
 
@@ -953,6 +963,7 @@ def test_select_move_with_model_handles_forced_pass_without_model_call(
     assert result["best_move"] is None
     assert result["forced_pass"] is True
     assert result["source"] == "forced_pass"
+    assert result["completed_depth"] is None
     assert model.calls == 0
 
 
@@ -1006,6 +1017,7 @@ def test_select_move_with_model_prefers_exact_result_when_concurrent(
     assert result["output_format"] == "exact"
     assert result["timeout_reached"] is False
     assert result["exact_margin"] == 12
+    assert result["completed_depth"] is None
 
 
 def test_select_move_with_model_returns_exact_failure_below_threshold_without_model_fallback(
@@ -1050,6 +1062,7 @@ def test_select_move_with_model_returns_exact_failure_below_threshold_without_mo
     assert result["best_move"] is None
     assert result["failure_reason"] == "synthetic_failure"
     assert result["timeout_reached"] is False
+    assert result["completed_depth"] is None
     assert model.calls == 0
     assert 0.18 <= elapsed < 0.5
 
@@ -1096,6 +1109,7 @@ def test_select_move_with_model_always_try_exact_returns_model_when_model_finish
             "selected_probability": 1.0,
             "exact_margin": None,
             "timeout_reached": False,
+            "completed_depth": None,
         }
 
     monkeypatch.setattr(veloversi, "search_best_move_exact", _slow_exact_success)
@@ -1117,6 +1131,7 @@ def test_select_move_with_model_always_try_exact_returns_model_when_model_finish
     assert result["source"] == "policy"
     assert result["best_move"] == 44
     assert result["timeout_reached"] is False
+    assert result["completed_depth"] is None
     assert elapsed < 0.2
 
 
@@ -1163,6 +1178,191 @@ def test_select_move_with_model_always_try_exact_uses_exact_only_below_threshold
     assert result["source"] == "exact"
     assert result["best_move"] == 19
     assert result["exact_margin"] == 12
+    assert result["completed_depth"] is None
+
+
+def test_select_move_with_model_rejects_invalid_search_mode() -> None:
+    with pytest.raises(ValueError, match="search_mode"):
+        select_move_with_model(initial_board(), _FakeRustModel(), search_mode="bad")
+
+
+def test_select_move_with_model_iterative_returns_completed_depth_and_reorders_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(veloversi, "RustValueModel", _FakeRustModel)
+    move_by_bits = _initial_move_by_child_bits()
+    calls: list[tuple[int, int]] = []
+
+    def _fake_negamax(
+        board: Board,
+        depth: int,
+        deadline: float,
+        evaluate: object,
+        searched_nodes: list[int],
+        alpha: float,
+        beta: float,
+    ) -> tuple[float, list[int]]:
+        move = move_by_bits[board.to_bits()]
+        calls.append((depth, move))
+        searched_nodes[0] += 1
+        return -float(move), [move]
+
+    monkeypatch.setattr(veloversi, "_value_search_negamax", _fake_negamax)
+    model = _FakeRustModel()
+
+    result = select_move_with_model(
+        initial_board(),
+        model,
+        depth=2,
+        search_mode="iterative",
+    )
+
+    assert result["success"] is True
+    assert result["source"] == "value_search"
+    assert result["best_move"] == 44
+    assert result["completed_depth"] == 2
+    assert result["timeout_reached"] is False
+    # depth=1 iteration keeps natural order; depth=2 should start from the previous best move.
+    assert calls[:4] == [(0, 19), (0, 26), (0, 37), (0, 44)]
+    assert calls[4] == (1, 44)
+
+
+def test_select_move_with_model_iterative_timeout_returns_last_completed_depth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(veloversi, "RustValueModel", _FakeRustModel)
+    move_by_bits = _initial_move_by_child_bits()
+    timeout_exc = cast(type[Exception], getattr(veloversi, "_ModelSearchTimeout"))
+
+    def _fake_negamax(
+        board: Board,
+        depth: int,
+        deadline: float,
+        evaluate: object,
+        searched_nodes: list[int],
+        alpha: float,
+        beta: float,
+    ) -> tuple[float, list[int]]:
+        move = move_by_bits[board.to_bits()]
+        if depth >= 1:
+            raise timeout_exc
+        searched_nodes[0] += 1
+        return -float(move), [move]
+
+    monkeypatch.setattr(veloversi, "_value_search_negamax", _fake_negamax)
+    model = _FakeRustModel()
+
+    result = select_move_with_model(
+        initial_board(),
+        model,
+        depth=3,
+        search_mode="iterative",
+    )
+
+    assert result["success"] is True
+    assert result["best_move"] == 44
+    assert result["completed_depth"] == 1
+    assert result["timeout_reached"] is True
+    assert result["source"] == "value_search"
+
+
+def test_select_move_with_model_iterative_timeout_before_first_iteration_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(veloversi, "RustValueModel", _FakeRustModel)
+    timeout_exc = cast(type[Exception], getattr(veloversi, "_ModelSearchTimeout"))
+
+    def _always_timeout(
+        board: Board,
+        depth: int,
+        deadline: float,
+        evaluate: object,
+        searched_nodes: list[int],
+        alpha: float,
+        beta: float,
+    ) -> tuple[float, list[int]]:
+        raise timeout_exc
+
+    monkeypatch.setattr(veloversi, "_value_search_negamax", _always_timeout)
+    model = _FakeRustModel()
+
+    result = select_move_with_model(
+        initial_board(),
+        model,
+        depth=2,
+        search_mode="iterative",
+    )
+
+    assert result["success"] is False
+    assert result["failure_reason"] == "timeout"
+    assert result["completed_depth"] is None
+    assert result["timeout_reached"] is True
+
+
+def test_select_move_with_model_always_try_exact_iterative_returns_model_when_model_finishes_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(veloversi, "RustValueModel", _FakeRustModel)
+
+    def _slow_exact_success(
+        board_or_record: object,
+        timeout_seconds: float = 1.0,
+        *,
+        worker_count: int | None = None,
+        serial_fallback_empty_threshold: int = 18,
+        shared_tt_empty_threshold: int = 20,
+    ) -> dict[str, object]:
+        time.sleep(0.2)
+        return {
+            "success": True,
+            "best_move": 19,
+            "exact_margin": 12,
+            "pv": [19, 26],
+            "searched_nodes": 321,
+            "elapsed_seconds": timeout_seconds,
+            "failure_reason": None,
+        }
+
+    def _fast_iterative_result(**kwargs: object) -> dict[str, object]:
+        time.sleep(0.02)
+        return {
+            "success": True,
+            "best_move": 44,
+            "value": 0.5,
+            "policy": None,
+            "pv": [44],
+            "searched_nodes": 4,
+            "elapsed_seconds": 0.02,
+            "failure_reason": None,
+            "input_format": "nnue",
+            "output_format": "value",
+            "source": "value_search",
+            "forced_pass": False,
+            "selected_probability": None,
+            "exact_margin": None,
+            "timeout_reached": False,
+            "completed_depth": 1,
+        }
+
+    monkeypatch.setattr(veloversi, "search_best_move_exact", _slow_exact_success)
+    monkeypatch.setattr(veloversi, "_run_rust_model_selection_path", _fast_iterative_result)
+    model = _FakeRustModel()
+
+    result = select_move_with_model(
+        initial_board(),
+        model,
+        depth=2,
+        search_mode="iterative",
+        exact_from_empty_threshold=16,
+        always_try_exact=True,
+        timeout_seconds=0.5,
+    )
+
+    assert result["success"] is True
+    assert result["source"] == "value_search"
+    assert result["best_move"] == 44
+    assert result["completed_depth"] == 1
+    assert result["timeout_reached"] is False
 
 
 def test_finish_game_recording_requires_terminal_board() -> None:

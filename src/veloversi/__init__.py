@@ -378,6 +378,7 @@ class RecordedBoard:
         timeout_seconds: float = 1.0,
         *,
         policy_mode: str = "best",
+        search_mode: str = "fixed",
         device: str = "cpu",
         exact_from_empty_threshold: int | None = 16,
         always_try_exact: bool = False,
@@ -389,13 +390,14 @@ class RecordedBoard:
             depth: value 出力時の探索深さ。既定値は `1`。
             timeout_seconds: 探索全体の制限時間。
             policy_mode: `"best"` または `"sample"`。
+            search_mode: value 探索時のモード。`"fixed"` または `"iterative"`。
             device: 推論に使う device。既定値は `"cpu"`。
             exact_from_empty_threshold:
                 空き数がこの値以下なら exact 探索を優先します。
                 `None` の場合は exact へ切り替えません。
-        always_try_exact:
-            `True` の場合、`exact_from_empty_threshold` を超える局面でも
-            exact と model を並列開始します。閾値以下は値に関係なく exact-only で動作します。
+            always_try_exact:
+                `True` の場合、`exact_from_empty_threshold` を超える局面でも
+                exact と model を並列開始します。閾値以下は値に関係なく exact-only で動作します。
 
         Notes:
             `RecordedBoard` では常に `current_board` を対象にします。
@@ -406,6 +408,7 @@ class RecordedBoard:
             depth,
             timeout_seconds,
             policy_mode=policy_mode,
+            search_mode=search_mode,
             device=device,
             exact_from_empty_threshold=exact_from_empty_threshold,
             always_try_exact=always_try_exact,
@@ -858,6 +861,7 @@ def _board_select_move_with_model(
     timeout_seconds: float = 1.0,
     *,
     policy_mode: str = "best",
+    search_mode: str = "fixed",
     device: str = "cpu",
     exact_from_empty_threshold: int | None = 16,
     always_try_exact: bool = False,
@@ -869,6 +873,7 @@ def _board_select_move_with_model(
         depth,
         timeout_seconds,
         policy_mode=policy_mode,
+        search_mode=search_mode,
         device=device,
         exact_from_empty_threshold=exact_from_empty_threshold,
         always_try_exact=always_try_exact,
@@ -1301,6 +1306,12 @@ def _validate_policy_mode(value: object) -> str:
     return value
 
 
+def _validate_search_mode(value: object) -> str:
+    if type(value) is not str or value not in {"fixed", "iterative"}:
+        raise ValueError("search_mode must be 'fixed' or 'iterative'")
+    return value
+
+
 def _validate_device(value: object) -> str:
     if type(value) is not str or value == "":
         raise ValueError("device must be a non-empty str")
@@ -1491,6 +1502,9 @@ class _ModelSearchTimeout(Exception):
     pass
 
 
+_CORNER_SQUARES = frozenset({0, 7, 56, 63})
+
+
 def _value_search_negamax(
     board: Board,
     depth: int,
@@ -1556,6 +1570,7 @@ def _success_result(
     selected_probability: float | None = None,
     exact_margin: int | None = None,
     timeout_reached: bool = False,
+    completed_depth: int | None = None,
 ) -> dict[str, object]:
     return {
         "success": True,
@@ -1573,6 +1588,7 @@ def _success_result(
         "selected_probability": selected_probability,
         "exact_margin": exact_margin,
         "timeout_reached": timeout_reached,
+        "completed_depth": completed_depth,
     }
 
 
@@ -1585,6 +1601,7 @@ def _failure_result(
     source: str | None = None,
     searched_nodes: int = 0,
     timeout_reached: bool = False,
+    completed_depth: int | None = None,
 ) -> dict[str, object]:
     return {
         "success": False,
@@ -1602,6 +1619,7 @@ def _failure_result(
         "selected_probability": None,
         "exact_margin": None,
         "timeout_reached": timeout_reached,
+        "completed_depth": completed_depth,
     }
 
 
@@ -1658,6 +1676,64 @@ def _with_elapsed(
     return updated
 
 
+def _order_root_moves(
+    board: Board,
+    moves: list[int],
+    *,
+    previous_best_move: int | None = None,
+    policy_scores: dict[int, float] | None = None,
+) -> list[int]:
+    def key(move: int) -> tuple[int, float, int, int, int]:
+        child_mobility = len(board.apply_move(move).legal_moves_list())
+        policy_rank = 0.0 if policy_scores is None else -float(policy_scores.get(move, 0.0))
+        return (
+            0 if previous_best_move is not None and move == previous_best_move else 1,
+            policy_rank,
+            0 if move in _CORNER_SQUARES else 1,
+            child_mobility,
+            move,
+        )
+
+    return sorted(moves, key=key)
+
+
+def _run_value_search_iteration(
+    *,
+    board: Board,
+    root_moves: list[int],
+    depth: int,
+    deadline: float,
+    evaluate_position: object,
+    searched_nodes: list[int],
+) -> tuple[int | None, float, list[int], bool]:
+    best_move: int | None = None
+    best_value = -float("inf")
+    best_pv: list[int] = []
+
+    for move in root_moves:
+        if time.perf_counter() >= deadline:
+            return best_move, best_value, best_pv, True
+        try:
+            child_value, child_pv = _value_search_negamax(
+                board.apply_move(move),
+                depth - 1,
+                deadline,
+                evaluate_position,
+                searched_nodes,
+                -float("inf"),
+                float("inf"),
+            )
+        except _ModelSearchTimeout:
+            return best_move, best_value, best_pv, True
+        score = -child_value
+        if score > best_value:
+            best_value = score
+            best_move = move
+            best_pv = [move, *child_pv]
+
+    return best_move, best_value, best_pv, False
+
+
 def _run_model_selection_path(
     *,
     board: Board,
@@ -1665,6 +1741,7 @@ def _run_model_selection_path(
     depth: int,
     deadline: float,
     policy_mode: str,
+    search_mode: str,
     device: str,
     torch_module: object,
     start_time: float,
@@ -1695,6 +1772,7 @@ def _run_model_selection_path(
                 policy=distribution,
                 selected_probability=float(legal_probs[chosen_idx]),
                 timeout_reached=time.perf_counter() >= deadline,
+                completed_depth=None,
             )
 
         def evaluate_position(current_board: Board) -> float:
@@ -1710,6 +1788,7 @@ def _run_model_selection_path(
             evaluate_position=evaluate_position,
             start_time=start_time,
             input_format=input_format,
+            search_mode=search_mode,
         )
 
 
@@ -1721,58 +1800,117 @@ def _run_value_search_path(
     evaluate_position: object,
     start_time: float,
     input_format: str,
+    search_mode: str,
 ) -> dict[str, object]:
     searched_nodes = [0]
-    legal_moves = board.legal_moves_list()
-    best_move: int | None = None
-    best_value = -float("inf")
-    best_pv: list[int] = []
-    timeout_reached = False
-
-    for move in legal_moves:
-        if time.perf_counter() >= deadline:
-            timeout_reached = True
-            break
-        try:
-            child_value, child_pv = _value_search_negamax(
-                board.apply_move(move),
-                depth - 1,
-                deadline,
-                evaluate_position,
-                searched_nodes,
-                -float("inf"),
-                float("inf"),
+    if search_mode == "fixed":
+        best_move, best_value, best_pv, timeout_reached = _run_value_search_iteration(
+            board=board,
+            root_moves=board.legal_moves_list(),
+            depth=depth,
+            deadline=deadline,
+            evaluate_position=evaluate_position,
+            searched_nodes=searched_nodes,
+        )
+        elapsed = time.perf_counter() - start_time
+        if best_move is None:
+            return _failure_result(
+                elapsed_seconds=elapsed,
+                failure_reason="timeout" if timeout_reached else "no_legal_moves",
+                input_format=input_format,
+                output_format="value",
+                source="value_search",
+                searched_nodes=searched_nodes[0],
+                timeout_reached=timeout_reached,
+                completed_depth=None,
             )
-        except _ModelSearchTimeout:
-            timeout_reached = True
-            break
-        score = -child_value
-        if score > best_value:
-            best_value = score
-            best_move = move
-            best_pv = [move, *child_pv]
-
-    elapsed = time.perf_counter() - start_time
-    if best_move is None:
-        return _failure_result(
+        return _success_result(
+            best_move=best_move,
             elapsed_seconds=elapsed,
-            failure_reason="timeout" if timeout_reached else "no_legal_moves",
             input_format=input_format,
             output_format="value",
             source="value_search",
+            pv=best_pv,
             searched_nodes=searched_nodes[0],
+            value=float(best_value),
             timeout_reached=timeout_reached,
+            completed_depth=None,
         )
+
+    previous_best_move: int | None = None
+    completed_depth: int | None = None
+    completed_best_move: int | None = None
+    completed_best_value = -float("inf")
+    completed_best_pv: list[int] = []
+
+    for current_depth in range(1, depth + 1):
+        best_move, best_value, best_pv, timeout_reached = _run_value_search_iteration(
+            board=board,
+            root_moves=_order_root_moves(
+                board,
+                board.legal_moves_list(),
+                previous_best_move=previous_best_move,
+                policy_scores=None,
+            ),
+            depth=current_depth,
+            deadline=deadline,
+            evaluate_position=evaluate_position,
+            searched_nodes=searched_nodes,
+        )
+        if timeout_reached:
+            elapsed = time.perf_counter() - start_time
+            if completed_depth is None or completed_best_move is None:
+                return _failure_result(
+                    elapsed_seconds=elapsed,
+                    failure_reason="timeout",
+                    input_format=input_format,
+                    output_format="value",
+                    source="value_search",
+                    searched_nodes=searched_nodes[0],
+                    timeout_reached=True,
+                    completed_depth=None,
+                )
+            return _success_result(
+                best_move=completed_best_move,
+                elapsed_seconds=elapsed,
+                input_format=input_format,
+                output_format="value",
+                source="value_search",
+                pv=completed_best_pv,
+                searched_nodes=searched_nodes[0],
+                value=float(completed_best_value),
+                timeout_reached=True,
+                completed_depth=completed_depth,
+            )
+        if best_move is None:
+            elapsed = time.perf_counter() - start_time
+            return _failure_result(
+                elapsed_seconds=elapsed,
+                failure_reason="no_legal_moves",
+                input_format=input_format,
+                output_format="value",
+                source="value_search",
+                searched_nodes=searched_nodes[0],
+                timeout_reached=False,
+                completed_depth=completed_depth,
+            )
+        previous_best_move = best_move
+        completed_depth = current_depth
+        completed_best_move = best_move
+        completed_best_value = best_value
+        completed_best_pv = best_pv
+
     return _success_result(
-        best_move=best_move,
-        elapsed_seconds=elapsed,
+        best_move=completed_best_move,
+        elapsed_seconds=time.perf_counter() - start_time,
         input_format=input_format,
         output_format="value",
         source="value_search",
-        pv=best_pv,
+        pv=completed_best_pv,
         searched_nodes=searched_nodes[0],
-        value=float(best_value),
-        timeout_reached=timeout_reached,
+        value=float(completed_best_value),
+        timeout_reached=False,
+        completed_depth=completed_depth,
     )
 
 
@@ -1783,6 +1921,7 @@ def _run_rust_model_selection_path(
     depth: int,
     deadline: float,
     start_time: float,
+    search_mode: str,
 ) -> dict[str, object]:
     def evaluate_position(current_board: Board) -> float:
         return float(model.evaluate_board(current_board))
@@ -1794,6 +1933,7 @@ def _run_rust_model_selection_path(
         evaluate_position=evaluate_position,
         start_time=start_time,
         input_format="nnue",
+        search_mode=search_mode,
     )
 
 
@@ -1804,6 +1944,7 @@ def select_move_with_model(
     timeout_seconds: float = 1.0,
     *,
     policy_mode: str = "best",
+    search_mode: str = "fixed",
     device: str = "cpu",
     exact_from_empty_threshold: int | None = 16,
     always_try_exact: bool = False,
@@ -1816,6 +1957,9 @@ def select_move_with_model(
         depth: value 出力時の探索深さ。既定値は `1`。
         timeout_seconds: 探索全体の制限時間。
         policy_mode: `\"best\"` または `\"sample\"`。
+        search_mode:
+            value 出力時の探索モード。`\"fixed\"` または `\"iterative\"`。
+            policy 出力経路では無視されます。
         device: PyTorch 推論に使う device。Rust model では無視されます。
         exact_from_empty_threshold:
             空き数がこの値以下なら exact 探索を優先します。
@@ -1842,11 +1986,13 @@ def select_move_with_model(
         - `selected_probability`: policy 経路で選ばれた手の確率
         - `exact_margin`: exact 経路の現在手番視点石差
         - `timeout_reached`: timeout に達した場合に `True`
+        - `completed_depth`: iterative mode で完了した最後の深さ。fixed / policy / exact では `None`
     """
     board = _board_from_board_or_record(board_or_record)
     validated_depth = _validate_positive_depth(depth)
     timeout_value = _validate_timeout_seconds(timeout_seconds, "timeout_seconds")
     validated_policy_mode = _validate_policy_mode(policy_mode)
+    validated_search_mode = _validate_search_mode(search_mode)
     validated_device = _validate_device(device)
     exact_threshold = _validate_optional_exact_threshold(exact_from_empty_threshold)
     validated_always_try_exact = _validate_always_try_exact(always_try_exact)
@@ -1911,6 +2057,7 @@ def select_move_with_model(
                     depth=validated_depth,
                     deadline=overall_deadline,
                     start_time=start,
+                    search_mode=validated_search_mode,
                 )
         else:
 
@@ -1921,6 +2068,7 @@ def select_move_with_model(
                     depth=validated_depth,
                     deadline=overall_deadline,
                     policy_mode=validated_policy_mode,
+                    search_mode=validated_search_mode,
                     device=validated_device,
                     torch_module=cast(object, torch_module),
                     start_time=start,
