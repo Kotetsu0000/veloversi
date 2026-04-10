@@ -13,3 +13,6 @@ mutants.out*
 
 # Local extension build artifacts
 src/veloversi/_core*.so
+
+# Local-only reference checkout
+ref/
