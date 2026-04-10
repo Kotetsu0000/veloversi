@@ -55,6 +55,7 @@ from ._core import (
 Board = _CoreBoard
 RustValueModel = _CoreRustValueModel
 model: Any
+dataloader: Any
 
 __all__ = [
     "Board",
@@ -90,6 +91,7 @@ __all__ = [
     "load_game_records",
     "RecordDataset",
     "open_game_record_dataset",
+    "get_dataloader",
     "supervised_examples_from_trace",
     "supervised_examples_from_traces",
     "packed_supervised_examples_from_trace",
@@ -109,6 +111,7 @@ __all__ = [
     "load_model",
     "export_model",
     "model",
+    "dataloader",
 ]
 
 
@@ -116,6 +119,10 @@ def __getattr__(name: str) -> object:
     if name == "model":
         imported = importlib.import_module(f"{__name__}.model")
         globals()["model"] = imported
+        return imported
+    if name == "dataloader":
+        imported = importlib.import_module(f"{__name__}.dataloader")
+        globals()["dataloader"] = imported
         return imported
     raise AttributeError(name)
 
@@ -1015,11 +1022,39 @@ def open_game_record_dataset(paths: object) -> RecordDataset:
         - index 対象は policy target を持つ局面のみです。
         - pass 局面は dataset index から除外されます。
         - JSONL は append-only 前提です。
+        - game record 自体はメモリに保持します。
+        - CNN / flat / NNUE 特徴量は `get_*` 呼び出し時に局面復元して生成します。
     """
     records: list[dict[str, object]] = []
     for path in _normalize_record_dataset_paths(paths):
         records.extend(load_game_records(path))
     return RecordDataset(records)
+
+
+def get_dataloader(
+    paths: str | Path | list[str | Path],
+    batch_size: int,
+    *,
+    mode: str = "value_only",
+    shuffle: bool = True,
+    num_workers: int = 0,
+    drop_last: bool = False,
+    pin_memory: bool = False,
+) -> object:
+    """学習用 DataLoader を返します。
+
+    実装は `veloversi.dataloader.get_dataloader(...)` に委譲します。
+    """
+    dataloader_module = cast(Any, __getattr__("dataloader"))
+    return dataloader_module.get_dataloader(
+        paths,
+        batch_size,
+        mode=mode,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        drop_last=drop_last,
+        pin_memory=pin_memory,
+    )
 
 
 def _boards_from_board_or_record_batch(values: object) -> list[Board]:

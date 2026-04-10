@@ -1,7 +1,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 import time
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -163,11 +163,61 @@ def _initial_move_by_child_bits() -> dict[tuple[int, int, str], int]:
     return {board.apply_move(move).to_bits(): move for move in board.legal_moves_list()}
 
 
+def _record_result_from_margin(margin: int) -> str:
+    if margin > 0:
+        return "black"
+    if margin < 0:
+        return "white"
+    return "draw"
+
+
+class _FakeDatasetBase:
+    pass
+
+
+class _FakeDataLoader:
+    def __init__(
+        self,
+        dataset: object,
+        *,
+        batch_size: int,
+        shuffle: bool,
+        num_workers: int,
+        drop_last: bool,
+        pin_memory: bool,
+    ) -> None:
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.num_workers = num_workers
+        self.drop_last = drop_last
+        self.pin_memory = pin_memory
+
+    def __iter__(self) -> object:
+        dataset = cast(Any, self.dataset)
+        size = len(dataset)
+        if size == 0:
+            return iter(())
+        count = size if not self.drop_last else size - (size % self.batch_size)
+        if count == 0:
+            return iter(())
+        records = [dataset[index] for index in range(min(self.batch_size, count))]
+        keys = records[0].keys()
+        batch: dict[str, _FakeTensor] = {}
+        for key in keys:
+            values = [np.asarray(record[key]) for record in records]
+            batch[key] = _FakeTensor(np.stack(values, axis=0))
+        return iter((batch,))
+
+
 def _fake_torch_module() -> object:
     return SimpleNamespace(
         nn=SimpleNamespace(Module=_FakeModule),
         from_numpy=lambda array: _FakeTensor(array),
         no_grad=lambda: _FakeNoGrad(),
+        utils=SimpleNamespace(
+            data=SimpleNamespace(Dataset=_FakeDatasetBase, DataLoader=_FakeDataLoader)
+        ),
     )
 
 
@@ -795,6 +845,11 @@ def test_veloversi_model_nnue_requires_torch() -> None:
         veloversi.model.NNUE()
 
 
+def test_get_dataloader_requires_torch() -> None:
+    with pytest.raises(RuntimeError, match="veloversi.get_dataloader"):
+        veloversi.get_dataloader("dummy.jsonl", batch_size=4)
+
+
 def test_load_model_uses_core_loader(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     sentinel = object()
     calls: list[str] = []
@@ -809,6 +864,106 @@ def test_load_model_uses_core_loader(monkeypatch: pytest.MonkeyPatch, tmp_path: 
 
     assert result is sentinel
     assert calls == [str(tmp_path / "weights.vvm")]
+
+
+def test_get_dataloader_value_only_returns_training_batch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(veloversi.dataloader, "_import_torch_for_dataloader", _fake_torch_module)
+    trace = play_random_game(seed=0, config={"max_plies": None})
+    last_board = cast(list[Board], trace["boards"])[-1]
+    black_count, white_count, empty_count = disc_count(last_board)
+    record = {
+        "start_board": initial_board().to_bits(),
+        "moves": trace["moves"],
+        "final_result": _record_result_from_margin(int(trace["final_margin_from_black"])),
+        "final_black_discs": black_count,
+        "final_white_discs": white_count,
+        "final_empty_discs": empty_count,
+        "final_margin_from_black": trace["final_margin_from_black"],
+    }
+    path = tmp_path / "train.jsonl"
+    append_game_record(str(path), record)
+
+    loader = veloversi.get_dataloader(path, batch_size=1, mode="value_only", shuffle=False)
+    batch = next(iter(cast(Any, loader)))
+
+    assert tuple(batch["board_cnn"].numpy().shape) == (1, 3, 8, 8)
+    assert tuple(batch["board_flat"].numpy().shape) == (1, 192)
+    assert tuple(batch["board_nnue"].numpy().shape) == (1, 67)
+    assert tuple(batch["value"].numpy().shape) == (1, 1)
+
+
+def test_get_dataloader_policy_value_returns_training_batch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(veloversi.dataloader, "_import_torch_for_dataloader", _fake_torch_module)
+    path = tmp_path / "train.jsonl"
+    for seed in range(2):
+        trace = play_random_game(seed=seed, config={"max_plies": None})
+        last_board = cast(list[Board], trace["boards"])[-1]
+        black_count, white_count, empty_count = disc_count(last_board)
+        record = {
+            "start_board": initial_board().to_bits(),
+            "moves": trace["moves"],
+            "final_result": _record_result_from_margin(int(trace["final_margin_from_black"])),
+            "final_black_discs": black_count,
+            "final_white_discs": white_count,
+            "final_empty_discs": empty_count,
+            "final_margin_from_black": trace["final_margin_from_black"],
+        }
+        append_game_record(str(path), record)
+
+    loader = veloversi.get_dataloader(path, batch_size=2, mode="policy_value", shuffle=False)
+    batch = next(iter(cast(Any, loader)))
+
+    assert tuple(batch["board_cnn"].numpy().shape) == (2, 3, 8, 8)
+    assert tuple(batch["board_flat"].numpy().shape) == (2, 192)
+    assert tuple(batch["board_nnue"].numpy().shape) == (2, 67)
+    assert tuple(batch["value"].numpy().shape) == (2, 1)
+    assert tuple(batch["policy"].numpy().shape) == (2, 64)
+    assert tuple(batch["policy_index"].numpy().shape) == (2,)
+    assert tuple(batch["legal_mask"].numpy().shape) == (2, 64)
+
+
+def test_get_dataloader_policy_only_returns_training_batch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(veloversi.dataloader, "_import_torch_for_dataloader", _fake_torch_module)
+    path = tmp_path / "train.jsonl"
+    for seed in range(2):
+        trace = play_random_game(seed=seed, config={"max_plies": None})
+        last_board = cast(list[Board], trace["boards"])[-1]
+        black_count, white_count, empty_count = disc_count(last_board)
+        record = {
+            "start_board": initial_board().to_bits(),
+            "moves": trace["moves"],
+            "final_result": _record_result_from_margin(int(trace["final_margin_from_black"])),
+            "final_black_discs": black_count,
+            "final_white_discs": white_count,
+            "final_empty_discs": empty_count,
+            "final_margin_from_black": trace["final_margin_from_black"],
+        }
+        append_game_record(str(path), record)
+
+    loader = veloversi.get_dataloader(path, batch_size=2, mode="policy_only", shuffle=False)
+    batch = next(iter(cast(Any, loader)))
+
+    assert tuple(batch["board_cnn"].numpy().shape) == (2, 3, 8, 8)
+    assert tuple(batch["board_flat"].numpy().shape) == (2, 192)
+    assert tuple(batch["board_nnue"].numpy().shape) == (2, 67)
+    assert "value" not in batch
+    assert tuple(batch["policy"].numpy().shape) == (2, 64)
+    assert tuple(batch["policy_index"].numpy().shape) == (2,)
+    assert tuple(batch["legal_mask"].numpy().shape) == (2, 64)
+
+
+def test_get_dataloader_rejects_invalid_mode() -> None:
+    with pytest.raises(ValueError, match="mode"):
+        veloversi.get_dataloader("dummy.jsonl", batch_size=4, mode="bad")
 
 
 def test_select_move_with_rust_value_model_does_not_require_torch(
