@@ -1,4 +1,5 @@
 from bisect import bisect_right
+from collections.abc import Mapping
 import concurrent.futures
 import importlib
 import json
@@ -1431,9 +1432,9 @@ def _run_model_once(
 
 
 def _normalize_state_dict_keys(state_dict: object) -> dict[str, object]:
-    if type(state_dict) is not dict:
-        raise ValueError("export_model expects a state_dict dict saved by torch.save")
-    normalized = cast(dict[object, object], state_dict)
+    if not isinstance(state_dict, Mapping):
+        raise ValueError("export_model expects a state_dict mapping saved by torch.save")
+    normalized = dict(cast(Mapping[object, object], state_dict).items())
     if all(type(key) is str and str(key).startswith("module.") for key in normalized):
         return {str(key)[7:]: value for key, value in normalized.items()}
     if any(type(key) is str and str(key).startswith("module.") for key in normalized):

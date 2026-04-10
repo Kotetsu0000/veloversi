@@ -1,3 +1,4 @@
+from collections import OrderedDict
 from pathlib import Path
 from types import SimpleNamespace
 import time
@@ -838,6 +839,19 @@ def test_export_model_requires_torch(monkeypatch: pytest.MonkeyPatch, tmp_path: 
 
     with pytest.raises(RuntimeError, match="export_model"):
         export_model(tmp_path / "weights.pth", tmp_path / "weights.vvm")
+
+
+def test_normalize_state_dict_keys_accepts_ordered_dict() -> None:
+    normalized = veloversi._normalize_state_dict_keys(  # type: ignore[attr-defined]
+        OrderedDict(
+            [
+                ("fc1.weight", object()),
+                ("fc1.bias", object()),
+            ]
+        )
+    )
+
+    assert list(normalized.keys()) == ["fc1.weight", "fc1.bias"]
 
 
 def test_veloversi_model_nnue_requires_torch() -> None:
