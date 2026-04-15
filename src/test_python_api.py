@@ -10,6 +10,7 @@ import veloversi
 import veloversi._core as core
 
 from veloversi import (
+    BalancedOpeningSet,
     Board,
     RecordedBoard,
     all_symmetries,
@@ -24,10 +25,12 @@ from veloversi import (
     encode_planes_batch,
     final_margin_from_black,
     game_result,
+    generate_balanced_opening_file,
     generate_legal_moves,
     initial_board,
     is_legal_move,
     legal_moves_list,
+    load_balanced_opening_file,
     load_game_records,
     open_game_record_dataset,
     pack_board,
@@ -37,6 +40,7 @@ from veloversi import (
     prepare_cnn_model_input,
     prepare_cnn_model_input_batch,
     random_start_board,
+    random_balanced_opening_board,
     record_move,
     record_pass,
     search_best_move_exact,
@@ -138,6 +142,45 @@ class _FlatValueModel(_FakeModule):
         weights = np.arange(64, dtype=np.float32)
         score = -float(np.dot(opp, weights) / max(np.sum(opp), 1.0) / 63.0)
         return _FakeTensor(np.asarray([score], dtype=np.float32))
+
+
+class _BatchFlatValueModel(_FakeModule):
+    def __init__(self, value: float = 0.0) -> None:
+        super().__init__()
+        self.value = value
+        self.calls = 0
+        self.batch_shapes: list[tuple[int, ...]] = []
+
+    def forward(self, tensor: _FakeTensor) -> _FakeTensor:
+        self.calls += 1
+        array = tensor.numpy()
+        if len(array.shape) == 4:
+            raise ValueError(f"unexpected cnn shape: {array.shape}")
+        if len(array.shape) != 2 or array.shape[1] != 192:
+            raise ValueError(f"unexpected flat shape: {array.shape}")
+        self.batch_shapes.append(tuple(array.shape))
+        values = np.full((array.shape[0], 1), self.value, dtype=np.float32)
+        return _FakeTensor(values)
+
+
+class _BatchPolicyModel(_FakeModule):
+    def forward(self, tensor: _FakeTensor) -> _FakeTensor:
+        array = tensor.numpy()
+        if len(array.shape) == 4:
+            return _FakeTensor(np.zeros((array.shape[0], 64), dtype=np.float32))
+        raise ValueError(f"unexpected flat shape: {array.shape}")
+
+
+class _NonFiniteBatchFlatValueModel(_BatchFlatValueModel):
+    def forward(self, tensor: _FakeTensor) -> _FakeTensor:
+        array = tensor.numpy()
+        if len(array.shape) == 4:
+            raise ValueError(f"unexpected cnn shape: {array.shape}")
+        self.batch_shapes.append(tuple(array.shape))
+        values = np.zeros((array.shape[0], 1), dtype=np.float32)
+        if array.shape[0] > 0:
+            values[0, 0] = np.nan
+        return _FakeTensor(values)
 
 
 class _AmbiguousModel(_FakeModule):
@@ -699,6 +742,114 @@ def test_random_start_board_is_reproducible() -> None:
     assert lhs.to_bits() == rhs.to_bits()
 
 
+def test_generate_load_and_sample_balanced_opening_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(veloversi, "_import_torch", _fake_torch_module)
+    model = _BatchFlatValueModel(value=0.5)
+    path = tmp_path / "balanced.jsonl"
+
+    stats = generate_balanced_opening_file(
+        model,
+        path,
+        plies=2,
+        threshold=1.0,
+        value_scale="normalized",
+        batch_size=3,
+        dedupe_symmetry=False,
+    )
+
+    assert stats["generated"] == 12
+    assert stats["accepted"] == 12
+    assert stats["skipped_non_finite"] == 0
+    assert path.exists()
+    assert model.batch_shapes
+    assert max(shape[0] for shape in model.batch_shapes) <= 3
+    assert model.training is True
+
+    openings = load_balanced_opening_file(path, validate=True)
+    assert isinstance(openings, BalancedOpeningSet)
+    assert len(openings) == 12
+    assert len(openings.entries) == 12
+    assert len(openings.boards) == 12
+    first_entry = openings.entries[0]
+    assert first_entry["raw_value"] == pytest.approx(0.5)
+    assert first_entry["normalized_value"] == pytest.approx(float(np.tanh(0.5)))
+    assert first_entry["filter_value"] == pytest.approx(float(np.tanh(0.5)))
+
+    first = random_balanced_opening_board(openings, seed=123)
+    second = random_balanced_opening_board(openings, seed=123)
+    from_path = random_balanced_opening_board(path, seed=123)
+    assert first.to_bits() == second.to_bits()
+    assert first.to_bits() == from_path.to_bits()
+    validate_board(first)
+
+
+def test_generate_balanced_opening_file_supports_raw_scale_and_non_finite_skip(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(veloversi, "_import_torch", _fake_torch_module)
+    path = tmp_path / "balanced-raw.jsonl"
+
+    stats = generate_balanced_opening_file(
+        _NonFiniteBatchFlatValueModel(),
+        path,
+        plies=1,
+        threshold=0.0,
+        value_scale="raw",
+        batch_size=8,
+    )
+
+    assert stats["generated"] == 1
+    assert stats["accepted"] == 0
+    assert stats["skipped_non_finite"] == 1
+    openings = load_balanced_opening_file(path)
+    assert len(openings) == 0
+    with pytest.raises(ValueError, match="empty"):
+        random_balanced_opening_board(openings, seed=0)
+
+
+def test_generate_balanced_opening_file_rejects_policy_model_and_invalid_options(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(veloversi, "_import_torch", _fake_torch_module)
+    model = _BatchFlatValueModel()
+
+    with pytest.raises(ValueError, match="policy"):
+        generate_balanced_opening_file(_BatchPolicyModel(), tmp_path / "policy.jsonl", plies=1)
+    with pytest.raises(ValueError, match="batch_size"):
+        generate_balanced_opening_file(model, tmp_path / "bad-batch.jsonl", batch_size=0)
+    with pytest.raises(ValueError, match="plies"):
+        generate_balanced_opening_file(model, tmp_path / "bad-plies.jsonl", plies=61)
+    with pytest.raises(ValueError, match="threshold"):
+        generate_balanced_opening_file(model, tmp_path / "bad-threshold.jsonl", threshold=-0.1)
+    with pytest.raises(ValueError, match="value_scale"):
+        generate_balanced_opening_file(model, tmp_path / "bad-scale.jsonl", value_scale="bad")
+    with pytest.raises(ValueError, match="seed"):
+        random_balanced_opening_board(BalancedOpeningSet([], []), seed=-1)
+
+
+def test_load_balanced_opening_file_validation_rejects_mismatched_sequence(
+    tmp_path: Path,
+) -> None:
+    board = initial_board().apply_move(19)
+    black_bits, white_bits, side_to_move = board.to_bits()
+    path = tmp_path / "bad-balanced.jsonl"
+    path.write_text(
+        (
+            '{"sequence":"f5","black_bits":'
+            f'{black_bits},"white_bits":{white_bits},"side_to_move":"{side_to_move}",'
+            '"raw_value":0.0,"normalized_value":0.0,"filter_value":0.0}\n'
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="sequence"):
+        load_balanced_opening_file(path, validate=True)
+    openings = load_balanced_opening_file(path, validate=False)
+    assert len(openings) == 1
+
+
 def test_start_game_recording_and_record_move_update_current_board() -> None:
     record = start_game_recording(initial_board())
     next_record = record_move(record, 19)
@@ -998,6 +1149,8 @@ def test_select_move_with_rust_value_model_does_not_require_torch(
     assert result["source"] == "value_search"
     assert result["best_move"] == 44
     assert result["completed_depth"] is None
+    assert result["raw_value"] is not None
+    assert result["value"] == pytest.approx(float(np.tanh(cast(float, result["raw_value"]))))
     assert model.calls >= 4
 
 
@@ -1018,6 +1171,7 @@ def test_select_move_with_model_policy_cnn_supports_board_and_record(
         assert candidate["input_format"] == "cnn"
         assert candidate["output_format"] == "policy"
         assert candidate["source"] == "policy"
+        assert candidate["raw_value"] is None
         assert candidate["forced_pass"] is False
         assert candidate["timeout_reached"] is False
         assert candidate["completed_depth"] is None
@@ -1059,6 +1213,8 @@ def test_select_move_with_model_value_flat_search_and_partial_timeout(
     assert result["source"] == "value_search"
     assert result["timeout_reached"] is False
     assert result["completed_depth"] is None
+    assert result["raw_value"] is not None
+    assert result["value"] == pytest.approx(float(np.tanh(cast(float, result["raw_value"]))))
     assert cast(float, result["value"]) > 0.0
     assert cast(int, result["searched_nodes"]) >= 4
     assert model.training is True
@@ -1115,6 +1271,7 @@ def test_select_move_with_model_uses_exact_fallback_and_prefers_exact_result(
     assert result["source"] == "exact"
     assert result["exact_margin"] == -48
     assert result["value"] == pytest.approx(-48.0 / 64.0)
+    assert result["raw_value"] is None
     assert result["completed_depth"] is None
     assert model.calls >= 0
 

@@ -3,7 +3,10 @@ from collections.abc import Mapping
 import concurrent.futures
 import importlib
 import json
+import math
 from pathlib import Path
+import random
+import tempfile
 import time
 from typing import Any, cast, overload
 
@@ -109,6 +112,10 @@ __all__ = [
     "transform_square",
     "search_best_move_exact",
     "select_move_with_model",
+    "BalancedOpeningSet",
+    "generate_balanced_opening_file",
+    "load_balanced_opening_file",
+    "random_balanced_opening_board",
     "load_model",
     "export_model",
     "model",
@@ -156,10 +163,37 @@ def _validate_optional_positive_int(value: object, name: str) -> int | None:
     return value
 
 
+def _validate_positive_int(value: object, name: str) -> int:
+    if type(value) is not int or value <= 0:
+        raise ValueError(f"{name} must be a positive int")
+    return value
+
+
 def _validate_u8(value: object, name: str) -> int:
     if type(value) is not int or not (0 <= value <= 0xFF):
         raise ValueError(f"{name} must be an int in 0..255")
     return value
+
+
+def _validate_u64(value: object, name: str) -> int:
+    if type(value) is not int or not (0 <= value <= 0xFFFF_FFFF_FFFF_FFFF):
+        raise ValueError(f"{name} must be an int in 0..18446744073709551615")
+    return value
+
+
+def _validate_plies(value: object) -> int:
+    if type(value) is not int or not (0 <= value <= 60):
+        raise ValueError("plies must be an int in 0..60")
+    return value
+
+
+def _validate_threshold(value: object) -> float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ValueError("threshold must be a finite number >= 0")
+    threshold = float(value)
+    if not math.isfinite(threshold) or threshold < 0.0:
+        raise ValueError("threshold must be a finite number >= 0")
+    return threshold
 
 
 def _validate_bool(value: object, name: str) -> bool:
@@ -955,6 +989,362 @@ def sample_reachable_positions(seed: int, config: dict) -> list[Board]:
     ]
 
 
+class BalancedOpeningSet:
+    """`generate_balanced_opening_file(...)` が生成した序盤局面集合です。"""
+
+    __slots__ = ("_entries", "_boards")
+
+    def __init__(self, entries: list[dict[str, object]], boards: list[Board]) -> None:
+        if len(entries) != len(boards):
+            raise ValueError("entries and boards length must match")
+        self._entries = list(entries)
+        self._boards = list(boards)
+
+    def __len__(self) -> int:
+        return len(self._boards)
+
+    @property
+    def entries(self) -> list[dict[str, object]]:
+        """JSONL 由来の entry 一覧を返します。"""
+        return [dict(entry) for entry in self._entries]
+
+    @property
+    def boards(self) -> list[Board]:
+        """entry から復元した `Board` 一覧を返します。"""
+        return list(self._boards)
+
+
+def _square_to_coordinate(square: int) -> str:
+    file_index = square % 8
+    rank_index = square // 8
+    return f"{chr(ord('a') + file_index)}{rank_index + 1}"
+
+
+def _coordinate_to_square(coordinate: str) -> int:
+    if len(coordinate) != 2:
+        raise ValueError("coordinate must have length 2")
+    file_char = coordinate[0].lower()
+    rank_char = coordinate[1]
+    if file_char < "a" or file_char > "h" or rank_char < "1" or rank_char > "8":
+        raise ValueError("coordinate must be in a1..h8")
+    return (ord(rank_char) - ord("1")) * 8 + (ord(file_char) - ord("a"))
+
+
+def _replay_opening_sequence(sequence: str) -> Board:
+    if type(sequence) is not str or len(sequence) % 2 != 0:
+        raise ValueError("sequence must be a string of concatenated coordinates")
+    board = initial_board()
+    for offset in range(0, len(sequence), 2):
+        while board.board_status() == "forced_pass":
+            board = board.apply_forced_pass()
+        move = _coordinate_to_square(sequence[offset : offset + 2])
+        board = board.apply_move(move)
+    return board
+
+
+def _balanced_opening_symmetry_key(board: Board) -> tuple[int, int, str]:
+    return min(transform_board(board, sym).to_bits() for sym in all_symmetries())
+
+
+def _enumerate_opening_candidates(
+    plies: int,
+    *,
+    dedupe_symmetry: bool,
+) -> list[tuple[str, Board]]:
+    candidates: list[tuple[str, Board]] = []
+    seen: set[tuple[int, int, str]] = set()
+
+    def visit(board: Board, remaining: int, sequence: str) -> None:
+        if remaining == 0 or board.board_status() == "terminal":
+            key = _balanced_opening_symmetry_key(board) if dedupe_symmetry else board.to_bits()
+            if key in seen:
+                return
+            seen.add(key)
+            candidates.append((sequence, board))
+            return
+        if board.board_status() == "forced_pass":
+            visit(board.apply_forced_pass(), remaining - 1, sequence)
+            return
+        for move in board.legal_moves_list():
+            visit(
+                board.apply_move(move),
+                remaining - 1,
+                f"{sequence}{_square_to_coordinate(move)}",
+            )
+
+    visit(initial_board(), plies, "")
+    return candidates
+
+
+def _validate_value_scale(value: object) -> str:
+    if type(value) is not str or value not in {"normalized", "raw"}:
+        raise ValueError("value_scale must be 'normalized' or 'raw'")
+    return value
+
+
+def _opening_entry_from_board(
+    sequence: str,
+    board: Board,
+    *,
+    raw_value: float,
+    normalized_value: float,
+    filter_value: float,
+) -> dict[str, object]:
+    black_bits, white_bits, side_to_move = board.to_bits()
+    return {
+        "sequence": sequence,
+        "black_bits": black_bits,
+        "white_bits": white_bits,
+        "side_to_move": side_to_move,
+        "raw_value": raw_value,
+        "normalized_value": normalized_value,
+        "filter_value": filter_value,
+    }
+
+
+def _write_balanced_opening_entries_atomic(
+    path: Path,
+    entries: list[dict[str, object]],
+) -> None:
+    handle = tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    )
+    temp_path = Path(handle.name)
+    try:
+        with handle:
+            for entry in entries:
+                handle.write(json.dumps(entry, separators=(",", ":")))
+                handle.write("\n")
+        temp_path.replace(path)
+    except BaseException:
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _detect_value_model_input_format(
+    model: object,
+    board: Board,
+    torch_module: object,
+    device: str,
+) -> str:
+    input_format, output_format, _ = _detect_model_io(model, board, torch_module, device)
+    if output_format == "policy":
+        raise ValueError("policy output model cannot generate balanced opening files")
+    return input_format
+
+
+def _balanced_opening_raw_values(
+    model: object,
+    boards: list[Board],
+    *,
+    batch_size: int,
+    device: str,
+) -> list[float]:
+    if _is_rust_value_model(model):
+        return [float(cast(RustValueModel, model).evaluate_board(board)) for board in boards]
+
+    torch_module = _import_torch()
+    _validate_torch_model(model, torch_module)
+    was_training = bool(getattr(model, "training", False))
+    if hasattr(model, "eval"):
+        cast(Any, model).eval()
+    try:
+        input_format = _detect_value_model_input_format(model, boards[0], torch_module, device)
+        values: list[float] = []
+        with getattr(torch_module, "no_grad")():
+            for start in range(0, len(boards), batch_size):
+                chunk = boards[start : start + batch_size]
+                batch_values = _run_model_value_batch(
+                    model,
+                    chunk,
+                    input_format,
+                    torch_module,
+                    device,
+                )
+                values.extend(float(value) for value in batch_values)
+        return values
+    finally:
+        if hasattr(model, "train"):
+            cast(Any, model).train(was_training)
+
+
+def generate_balanced_opening_file(
+    model: object,
+    path: str | Path,
+    *,
+    plies: int = 8,
+    threshold: float = 2 / 64,
+    value_scale: str = "normalized",
+    batch_size: int = 1024,
+    dedupe_symmetry: bool = True,
+    device: str = "cpu",
+) -> dict[str, object]:
+    """model で評価した均衡序盤局面を JSONL に出力します。"""
+    target_path = _validate_model_path(path, name="path")
+    validated_plies = _validate_plies(plies)
+    validated_threshold = _validate_threshold(threshold)
+    validated_value_scale = _validate_value_scale(value_scale)
+    validated_batch_size = _validate_positive_int(batch_size, "batch_size")
+    validated_dedupe = _validate_bool(dedupe_symmetry, "dedupe_symmetry")
+    validated_device = _validate_device(device)
+
+    candidates = _enumerate_opening_candidates(
+        validated_plies,
+        dedupe_symmetry=validated_dedupe,
+    )
+    if not candidates:
+        _write_balanced_opening_entries_atomic(target_path, [])
+        return {
+            "generated": 0,
+            "accepted": 0,
+            "path": str(target_path),
+            "plies": validated_plies,
+            "threshold": validated_threshold,
+            "value_scale": validated_value_scale,
+            "batch_size": validated_batch_size,
+            "dedupe_symmetry": validated_dedupe,
+            "skipped_non_finite": 0,
+        }
+
+    sequences = [sequence for sequence, _ in candidates]
+    boards = [board for _, board in candidates]
+    raw_values = _balanced_opening_raw_values(
+        model,
+        boards,
+        batch_size=validated_batch_size,
+        device=validated_device,
+    )
+
+    entries: list[dict[str, object]] = []
+    skipped_non_finite = 0
+    for sequence, board, raw_value in zip(sequences, boards, raw_values, strict=True):
+        normalized_value = _normalized_value_from_raw(raw_value)
+        filter_value = normalized_value if validated_value_scale == "normalized" else raw_value
+        if not (
+            math.isfinite(raw_value)
+            and math.isfinite(normalized_value)
+            and math.isfinite(filter_value)
+        ):
+            skipped_non_finite += 1
+            continue
+        if abs(filter_value) <= validated_threshold:
+            entries.append(
+                _opening_entry_from_board(
+                    sequence,
+                    board,
+                    raw_value=raw_value,
+                    normalized_value=normalized_value,
+                    filter_value=filter_value,
+                )
+            )
+
+    _write_balanced_opening_entries_atomic(target_path, entries)
+    return {
+        "generated": len(candidates),
+        "accepted": len(entries),
+        "path": str(target_path),
+        "plies": validated_plies,
+        "threshold": validated_threshold,
+        "value_scale": validated_value_scale,
+        "batch_size": validated_batch_size,
+        "dedupe_symmetry": validated_dedupe,
+        "skipped_non_finite": skipped_non_finite,
+    }
+
+
+def _load_balanced_opening_entry(
+    value: object, *, line_number: int
+) -> tuple[dict[str, object], Board]:
+    if type(value) is not dict:
+        raise ValueError(f"line {line_number}: entry must be a JSON object")
+    entry = cast(dict[object, object], value)
+    sequence = entry.get("sequence")
+    black_bits = entry.get("black_bits")
+    white_bits = entry.get("white_bits")
+    side_to_move = entry.get("side_to_move")
+    raw_value = entry.get("raw_value")
+    normalized_value = entry.get("normalized_value")
+    filter_value = entry.get("filter_value")
+    if type(sequence) is not str:
+        raise ValueError(f"line {line_number}: sequence must be a str")
+    if type(black_bits) is not int or type(white_bits) is not int:
+        raise ValueError(f"line {line_number}: black_bits and white_bits must be int")
+    if type(side_to_move) is not str:
+        raise ValueError(f"line {line_number}: side_to_move must be a str")
+    for name, number in (
+        ("raw_value", raw_value),
+        ("normalized_value", normalized_value),
+        ("filter_value", filter_value),
+    ):
+        if not isinstance(number, (int, float)) or isinstance(number, bool):
+            raise ValueError(f"line {line_number}: {name} must be finite")
+        if not math.isfinite(float(number)):
+            raise ValueError(f"line {line_number}: {name} must be finite")
+    board = board_from_bits(black_bits, white_bits, side_to_move)
+    typed_entry = {
+        "sequence": sequence,
+        "black_bits": black_bits,
+        "white_bits": white_bits,
+        "side_to_move": side_to_move,
+        "raw_value": float(cast(int | float, raw_value)),
+        "normalized_value": float(cast(int | float, normalized_value)),
+        "filter_value": float(cast(int | float, filter_value)),
+    }
+    return typed_entry, board
+
+
+def load_balanced_opening_file(
+    path: str | Path,
+    *,
+    validate: bool = True,
+) -> BalancedOpeningSet:
+    """balanced opening JSONL を読み込みます。"""
+    source_path = _validate_model_path(path, name="path")
+    validated = _validate_bool(validate, "validate")
+    entries: list[dict[str, object]] = []
+    boards: list[Board] = []
+    with source_path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            stripped = line.strip()
+            if stripped == "":
+                continue
+            try:
+                raw_entry = json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"line {line_number}: invalid JSON") from exc
+            entry, board = _load_balanced_opening_entry(raw_entry, line_number=line_number)
+            if validated:
+                replayed = _replay_opening_sequence(cast(str, entry["sequence"]))
+                if replayed.to_bits() != board.to_bits():
+                    raise ValueError(f"line {line_number}: sequence does not match board bits")
+            entries.append(entry)
+            boards.append(board)
+    return BalancedOpeningSet(entries, boards)
+
+
+def random_balanced_opening_board(path_or_set: object, seed: int) -> Board:
+    """balanced opening set から seed 付きで 1 局面を選びます。"""
+    validated_seed = _validate_u64(seed, "seed")
+    if isinstance(path_or_set, BalancedOpeningSet):
+        opening_set = path_or_set
+    elif isinstance(path_or_set, (str, Path)):
+        opening_set = load_balanced_opening_file(path_or_set, validate=True)
+    else:
+        raise TypeError("path_or_set must be a str, Path, or BalancedOpeningSet")
+    if len(opening_set) == 0:
+        raise ValueError("balanced opening set is empty")
+    index = random.Random(validated_seed).randrange(len(opening_set))
+    return opening_set.boards[index]
+
+
 def start_game_recording(start_board: Board) -> RecordedBoard:
     """任意局面を開始点として recording を開始します。
 
@@ -1495,6 +1885,37 @@ def _detect_model_io(
     return input_format, output_format, root_output
 
 
+def _classify_batch_value_output(output: object, batch_size: int) -> np.ndarray:
+    array = _torch_output_to_numpy(output)
+    if array.ndim == 1 and array.shape == (batch_size,):
+        values = array
+    elif array.ndim == 2 and array.shape == (batch_size, 1):
+        values = array[:, 0]
+    elif array.ndim == 2 and array.shape == (batch_size, 64):
+        raise ValueError("policy output model cannot generate balanced opening files")
+    else:
+        raise ValueError("batch value output shape must be (B,) or (B, 1)")
+    return values.astype(np.float32, copy=False)
+
+
+def _run_model_value_batch(
+    model: object,
+    boards: list[Board],
+    input_format: str,
+    torch_module: object,
+    device: str,
+) -> np.ndarray:
+    if input_format == "cnn":
+        input_array = prepare_cnn_model_input_batch(cast(list[object], boards))
+    elif input_format == "flat":
+        input_array = prepare_flat_model_input_batch(cast(list[object], boards))
+    else:
+        raise ValueError("input_format must be 'cnn' or 'flat'")
+    tensor = _torch_tensor_from_numpy(torch_module, input_array, device)
+    output = cast(Any, model)(tensor)
+    return _classify_batch_value_output(output, len(boards))
+
+
 def _is_probability_distribution(values: np.ndarray) -> bool:
     if values.size == 0:
         return False
@@ -1532,6 +1953,10 @@ def _terminal_value_from_side_to_move(board: Board) -> float:
     if board.side_to_move == "white":
         margin = -margin
     return margin / 64.0
+
+
+def _normalized_value_from_raw(raw_value: float) -> float:
+    return math.tanh(raw_value)
 
 
 class _ModelSearchTimeout(Exception):
@@ -1602,6 +2027,7 @@ def _success_result(
     pv: list[int] | None = None,
     searched_nodes: int = 0,
     value: float | None = None,
+    raw_value: float | None = None,
     policy: np.ndarray | None = None,
     selected_probability: float | None = None,
     exact_margin: int | None = None,
@@ -1612,6 +2038,7 @@ def _success_result(
         "success": True,
         "best_move": best_move,
         "value": value,
+        "raw_value": raw_value,
         "policy": policy,
         "pv": [] if pv is None else list(pv),
         "searched_nodes": searched_nodes,
@@ -1643,6 +2070,7 @@ def _failure_result(
         "success": False,
         "best_move": None,
         "value": None,
+        "raw_value": None,
         "policy": None,
         "pv": [],
         "searched_nodes": searched_nodes,
@@ -1868,7 +2296,8 @@ def _run_value_search_path(
             source="value_search",
             pv=best_pv,
             searched_nodes=searched_nodes[0],
-            value=float(best_value),
+            value=_normalized_value_from_raw(float(best_value)),
+            raw_value=float(best_value),
             timeout_reached=timeout_reached,
             completed_depth=None,
         )
@@ -1914,7 +2343,8 @@ def _run_value_search_path(
                 source="value_search",
                 pv=completed_best_pv,
                 searched_nodes=searched_nodes[0],
-                value=float(completed_best_value),
+                value=_normalized_value_from_raw(float(completed_best_value)),
+                raw_value=float(completed_best_value),
                 timeout_reached=True,
                 completed_depth=completed_depth,
             )
@@ -1944,7 +2374,8 @@ def _run_value_search_path(
         source="value_search",
         pv=completed_best_pv,
         searched_nodes=searched_nodes[0],
-        value=float(completed_best_value),
+        value=_normalized_value_from_raw(float(completed_best_value)),
+        raw_value=float(completed_best_value),
         timeout_reached=False,
         completed_depth=completed_depth,
     )

@@ -34,7 +34,7 @@ XOT の公式リストは次のページから参照できる。
 
 ## version 方針
 
-- Step 40 は `0.3.x` の後続 feature として扱う
+- Step 40 は `0.4.0` として release する
 - 既存ユーザー互換は強く意識しすぎない
 - ただし raw value は `raw_value` として確認できるように残す
 
@@ -262,37 +262,37 @@ random_balanced_opening_board(path_or_set, seed: int) -> Board
 
 ## 受け入れ条件
 
-- [ ] `select_move_with_model(...)` の value 返却規約が整理されている
-- [ ] value 経路の返却 dict に normalized `value` が入る
-- [ ] value 経路の返却 dict に `raw_value` が入る
-- [ ] value 経路以外の返却 dict に `raw_value=None` が入る
-- [ ] PyTorch model と `RustValueModel` の返却 value scale が一貫している
-- [ ] `plies` 手合法手順を列挙できる
-- [ ] `generate_balanced_opening_file(...)` が JSONL を出力できる
-- [ ] `batch_size` を指定できる
-- [ ] `batch_size` が positive int でない場合に `ValueError` になる
-- [ ] `plies` が `0 <= plies <= 60` の int でない場合に `ValueError` になる
-- [ ] `threshold` が finite かつ `>= 0` でない場合に `ValueError` になる
-- [ ] PyTorch model の input format 検出が生成開始時 1 回に固定されている
-- [ ] policy 出力 model は `generate_balanced_opening_file(...)` で `ValueError` になる
-- [ ] PyTorch batch value 出力は `(B,)` / `(B, 1)` を受け付け、それ以外の value 不明 shape を拒否する
-- [ ] `value_scale="normalized"` と `"raw"` の両方を扱える
-- [ ] non-finite value の局面は保存されず、`skipped_non_finite` に数えられる
-- [ ] JSONL 書き出しが temporary file 経由で atomic に行われる
-- [ ] target path の親 directory が存在しない場合は自動作成せず file IO error になる
-- [ ] `accepted=0` でも生成関数が成功し、空 JSONL と stats を返す
-- [ ] JSONL には `sequence`, `black_bits`, `white_bits`, `side_to_move`, `raw_value`, `normalized_value`, `filter_value` が保存される
-- [ ] `BalancedOpeningSet` が public 型として提供される
-- [ ] `len(openings)`, `openings.entries`, `openings.boards` が使える
-- [ ] `load_balanced_opening_file(..., validate=True)` で sequence replay 検証ができる
-- [ ] `load_balanced_opening_file(..., validate=False)` で replay なしに読み込める
-- [ ] 空 JSONL は空の `BalancedOpeningSet` として読み込める
-- [ ] `random_balanced_opening_board(...)` が seed 付きで再現可能に盤面を返す
-- [ ] `seed` が `u64` 範囲の int でない場合に `ValueError` になる
-- [ ] 空の `BalancedOpeningSet` に対する `random_balanced_opening_board(...)` は `ValueError` になる
-- [ ] 返る盤面が `validate` を満たす
-- [ ] README / docstring / stub が更新されている
-- [ ] `make check` が成功する
+- [x] `select_move_with_model(...)` の value 返却規約が整理されている
+- [x] value 経路の返却 dict に normalized `value` が入る
+- [x] value 経路の返却 dict に `raw_value` が入る
+- [x] value 経路以外の返却 dict に `raw_value=None` が入る
+- [x] PyTorch model と `RustValueModel` の返却 value scale が一貫している
+- [x] `plies` 手合法手順を列挙できる
+- [x] `generate_balanced_opening_file(...)` が JSONL を出力できる
+- [x] `batch_size` を指定できる
+- [x] `batch_size` が positive int でない場合に `ValueError` になる
+- [x] `plies` が `0 <= plies <= 60` の int でない場合に `ValueError` になる
+- [x] `threshold` が finite かつ `>= 0` でない場合に `ValueError` になる
+- [x] PyTorch model の input format 検出が生成開始時 1 回に固定されている
+- [x] policy 出力 model は `generate_balanced_opening_file(...)` で `ValueError` になる
+- [x] PyTorch batch value 出力は `(B,)` / `(B, 1)` を受け付け、それ以外の value 不明 shape を拒否する
+- [x] `value_scale="normalized"` と `"raw"` の両方を扱える
+- [x] non-finite value の局面は保存されず、`skipped_non_finite` に数えられる
+- [x] JSONL 書き出しが temporary file 経由で atomic に行われる
+- [x] target path の親 directory が存在しない場合は自動作成せず file IO error になる
+- [x] `accepted=0` でも生成関数が成功し、空 JSONL と stats を返す
+- [x] JSONL には `sequence`, `black_bits`, `white_bits`, `side_to_move`, `raw_value`, `normalized_value`, `filter_value` が保存される
+- [x] `BalancedOpeningSet` が public 型として提供される
+- [x] `len(openings)`, `openings.entries`, `openings.boards` が使える
+- [x] `load_balanced_opening_file(..., validate=True)` で sequence replay 検証ができる
+- [x] `load_balanced_opening_file(..., validate=False)` で replay なしに読み込める
+- [x] 空 JSONL は空の `BalancedOpeningSet` として読み込める
+- [x] `random_balanced_opening_board(...)` が seed 付きで再現可能に盤面を返す
+- [x] `seed` が `u64` 範囲の int でない場合に `ValueError` になる
+- [x] 空の `BalancedOpeningSet` に対する `random_balanced_opening_board(...)` は `ValueError` になる
+- [x] 返る盤面が `validate` を満たす
+- [x] README / docstring / stub が更新されている
+- [x] `make check` が成功する
 
 ## 懸念点
 
