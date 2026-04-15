@@ -258,29 +258,29 @@ determinism:
 
 ## 受け入れ条件
 
-- [ ] `iter_opening_boards(path_or_set, *, validate=True)` が追加されている
-- [ ] `for item in iter_opening_boards(path)` で保存済み opening file の全局面を逐次取得できる
-- [ ] `for item in iter_opening_boards(opening_set)` で読み込み済み set の全局面を逐次取得できる
-- [ ] iterator item に `sequence`, `board`, `black_bits`, `white_bits`, `side_to_move`, `raw_value`, `normalized_value`, `filter_value` が含まれる
-- [ ] iterator item は未知 field を保持し、entry に `board` を追加した dict として返る
-- [ ] JSONL / `BalancedOpeningSet` の順序を維持して yield する
-- [ ] path 入力時は `validate` 引数が `load_balanced_opening_file(...)` に反映される
-- [ ] `BalancedOpeningSet` 入力時は `validate` を無視し、空 set は何も yield しない
-- [ ] `generate_balanced_opening_file(...)` が `eval_mode` / `eval_depth` を受け付ける
-- [ ] 既定の static 挙動が Step 40 と互換である
-- [ ] `eval_mode` / `eval_depth` の不正な組み合わせが `ValueError` になる
-- [ ] `eval_mode="value_search"` で探索評価を使って balanced 判定できる
-- [ ] `prefilter_threshold` が指定された場合、静的評価で候補を絞ってから探索する
-- [ ] prefilter value field は prefilter 指定時だけ JSONL に保存される
-- [ ] stats に `generated` / `prefiltered` / `searched` / `accepted` / `skipped_non_finite` が含まれ、定義どおりに増減する
-- [ ] Step 40 schema の JSONL を読み込むと `eval_mode="static"` / `eval_depth=0` として補完される
-- [ ] Step 41 schema の JSONL は未知 field を落とさず読み込める
-- [ ] output order が deterministic で、prefilter / search の有無で元候補順が崩れない
-- [ ] model 例外時に既存 target file が壊れない
-- [ ] PyTorch model の training 状態が例外時も復元される
-- [ ] version が `0.5.0` に更新されている
-- [ ] README / stub / tests が更新されている
-- [ ] `make check` が成功する
+- [x] `iter_opening_boards(path_or_set, *, validate=True)` が追加されている
+- [x] `for item in iter_opening_boards(path)` で保存済み opening file の全局面を逐次取得できる
+- [x] `for item in iter_opening_boards(opening_set)` で読み込み済み set の全局面を逐次取得できる
+- [x] iterator item に `sequence`, `board`, `black_bits`, `white_bits`, `side_to_move`, `raw_value`, `normalized_value`, `filter_value` が含まれる
+- [x] iterator item は未知 field を保持し、entry に `board` を追加した dict として返る
+- [x] JSONL / `BalancedOpeningSet` の順序を維持して yield する
+- [x] path 入力時は `validate` 引数が `load_balanced_opening_file(...)` に反映される
+- [x] `BalancedOpeningSet` 入力時は `validate` を無視し、空 set は何も yield しない
+- [x] `generate_balanced_opening_file(...)` が `eval_mode` / `eval_depth` を受け付ける
+- [x] 既定の static 挙動が Step 40 と互換である
+- [x] `eval_mode` / `eval_depth` の不正な組み合わせが `ValueError` になる
+- [x] `eval_mode="value_search"` で探索評価を使って balanced 判定できる
+- [x] `prefilter_threshold` が指定された場合、静的評価で候補を絞ってから探索する
+- [x] prefilter value field は prefilter 指定時だけ JSONL に保存される
+- [x] stats に `generated` / `prefiltered` / `searched` / `accepted` / `skipped_non_finite` が含まれ、定義どおりに増減する
+- [x] Step 40 schema の JSONL を読み込むと `eval_mode="static"` / `eval_depth=0` として補完される
+- [x] Step 41 schema の JSONL は未知 field を落とさず読み込める
+- [x] output order が deterministic で、prefilter / search の有無で元候補順が崩れない
+- [x] model 例外時に既存 target file が壊れない
+- [x] PyTorch model の training 状態が例外時も復元される
+- [x] version が `0.5.0` に更新されている
+- [x] README / stub / tests が更新されている
+- [x] `make check` が成功する
 
 ## 設計時に潰した懸念
 

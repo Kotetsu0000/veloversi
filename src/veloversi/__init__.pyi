@@ -1,4 +1,5 @@
 from pathlib import Path
+from collections.abc import Iterator
 from typing import overload
 
 import numpy as np
@@ -117,7 +118,15 @@ def generate_balanced_opening_file(
     batch_size: int = 1024,
     dedupe_symmetry: bool = True,
     device: str = "cpu",
+    eval_depth: int = 0,
+    eval_mode: str = "static",
+    prefilter_threshold: float | None = None,
 ) -> dict[str, object]: ...
+def iter_opening_boards(
+    path_or_set: str | Path | BalancedOpeningSet,
+    *,
+    validate: bool = True,
+) -> Iterator[dict[str, object]]: ...
 def load_balanced_opening_file(
     path: str | Path,
     *,

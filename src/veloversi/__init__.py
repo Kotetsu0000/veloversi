@@ -114,6 +114,7 @@ __all__ = [
     "select_move_with_model",
     "BalancedOpeningSet",
     "generate_balanced_opening_file",
+    "iter_opening_boards",
     "load_balanced_opening_file",
     "random_balanced_opening_board",
     "load_model",
@@ -1005,13 +1006,17 @@ class BalancedOpeningSet:
 
     @property
     def entries(self) -> list[dict[str, object]]:
-        """JSONL 由来の entry 一覧を返します。"""
+        """JSONL 由来の entry 一覧を copy として返します。"""
         return [dict(entry) for entry in self._entries]
 
     @property
     def boards(self) -> list[Board]:
-        """entry から復元した `Board` 一覧を返します。"""
+        """entry から復元した `Board` 一覧を copy として返します。"""
         return list(self._boards)
+
+    def _iter_items(self) -> object:
+        for entry, board in zip(self._entries, self._boards, strict=True):
+            yield {**entry, "board": board}
 
 
 def _square_to_coordinate(square: int) -> str:
@@ -1082,6 +1087,27 @@ def _validate_value_scale(value: object) -> str:
     return value
 
 
+def _validate_eval_mode(value: object) -> str:
+    if type(value) is not str or value not in {"static", "value_search"}:
+        raise ValueError("eval_mode must be 'static' or 'value_search'")
+    return value
+
+
+def _validate_eval_depth(value: object) -> int:
+    if type(value) is not int or not (0 <= value <= 60):
+        raise ValueError("eval_depth must be an int in 0..60")
+    return value
+
+
+def _validate_optional_threshold(value: object, name: str) -> float | None:
+    if value is None:
+        return None
+    try:
+        return _validate_threshold(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a finite number >= 0") from exc
+
+
 def _opening_entry_from_board(
     sequence: str,
     board: Board,
@@ -1089,9 +1115,12 @@ def _opening_entry_from_board(
     raw_value: float,
     normalized_value: float,
     filter_value: float,
+    eval_mode: str = "static",
+    eval_depth: int = 0,
+    prefilter_values: tuple[float, float, float] | None = None,
 ) -> dict[str, object]:
     black_bits, white_bits, side_to_move = board.to_bits()
-    return {
+    entry: dict[str, object] = {
         "sequence": sequence,
         "black_bits": black_bits,
         "white_bits": white_bits,
@@ -1099,7 +1128,19 @@ def _opening_entry_from_board(
         "raw_value": raw_value,
         "normalized_value": normalized_value,
         "filter_value": filter_value,
+        "eval_mode": eval_mode,
+        "eval_depth": eval_depth,
     }
+    if prefilter_values is not None:
+        prefilter_raw, prefilter_normalized, prefilter_filter = prefilter_values
+        entry.update(
+            {
+                "prefilter_raw_value": prefilter_raw,
+                "prefilter_normalized_value": prefilter_normalized,
+                "prefilter_filter_value": prefilter_filter,
+            }
+        )
+    return entry
 
 
 def _write_balanced_opening_entries_atomic(
@@ -1176,6 +1217,100 @@ def _balanced_opening_raw_values(
             cast(Any, model).train(was_training)
 
 
+class _BalancedOpeningValueEvaluator:
+    def __init__(self, model: object, first_board: Board, *, device: str) -> None:
+        self._model = model
+        self._device = device
+        self._is_rust = _is_rust_value_model(model)
+        self._torch_module: object | None = None
+        self._input_format = "nnue"
+        self._was_training = False
+        if not self._is_rust:
+            torch_module = _import_torch()
+            _validate_torch_model(model, torch_module)
+            self._torch_module = torch_module
+            self._was_training = bool(getattr(model, "training", False))
+            if hasattr(model, "eval"):
+                cast(Any, model).eval()
+            try:
+                self._input_format = _detect_value_model_input_format(
+                    model, first_board, torch_module, device
+                )
+            except BaseException:
+                self.close()
+                raise
+
+    def close(self) -> None:
+        if not self._is_rust and hasattr(self._model, "train"):
+            cast(Any, self._model).train(self._was_training)
+
+    def evaluate_batch(self, boards: list[Board], *, batch_size: int) -> list[float]:
+        if self._is_rust:
+            rust_model = cast(RustValueModel, self._model)
+            return [float(rust_model.evaluate_board(board)) for board in boards]
+
+        torch_module = cast(object, self._torch_module)
+        values: list[float] = []
+        with getattr(torch_module, "no_grad")():
+            for start in range(0, len(boards), batch_size):
+                chunk = boards[start : start + batch_size]
+                batch_values = _run_model_value_batch(
+                    self._model,
+                    chunk,
+                    self._input_format,
+                    torch_module,
+                    self._device,
+                )
+                values.extend(float(value) for value in batch_values)
+        return values
+
+    def evaluate_one(self, board: Board) -> float:
+        if self._is_rust:
+            return float(cast(RustValueModel, self._model).evaluate_board(board))
+
+        torch_module = cast(object, self._torch_module)
+        with getattr(torch_module, "no_grad")():
+            output_format, value_output = _run_model_once(
+                self._model,
+                board,
+                self._input_format,
+                torch_module,
+                self._device,
+            )
+        if output_format != "value":
+            raise ValueError("policy output model cannot generate balanced opening files")
+        return float(cast(np.float32, value_output))
+
+
+def _filter_value_from_raw(raw_value: float, value_scale: str) -> tuple[float, float]:
+    normalized_value = _normalized_value_from_raw(raw_value)
+    filter_value = normalized_value if value_scale == "normalized" else raw_value
+    return normalized_value, filter_value
+
+
+def _finite_opening_values(*values: float) -> bool:
+    return all(math.isfinite(value) for value in values)
+
+
+def _search_opening_raw_value(
+    board: Board,
+    *,
+    eval_depth: int,
+    evaluate_position: object,
+) -> tuple[float, int]:
+    searched_nodes = [0]
+    raw_value, _ = _value_search_negamax(
+        board,
+        eval_depth,
+        float("inf"),
+        evaluate_position,
+        searched_nodes,
+        -float("inf"),
+        float("inf"),
+    )
+    return float(raw_value), searched_nodes[0]
+
+
 def generate_balanced_opening_file(
     model: object,
     path: str | Path,
@@ -1186,6 +1321,9 @@ def generate_balanced_opening_file(
     batch_size: int = 1024,
     dedupe_symmetry: bool = True,
     device: str = "cpu",
+    eval_depth: int = 0,
+    eval_mode: str = "static",
+    prefilter_threshold: float | None = None,
 ) -> dict[str, object]:
     """model で評価した均衡序盤局面を JSONL に出力します。"""
     target_path = _validate_model_path(path, name="path")
@@ -1195,6 +1333,16 @@ def generate_balanced_opening_file(
     validated_batch_size = _validate_positive_int(batch_size, "batch_size")
     validated_dedupe = _validate_bool(dedupe_symmetry, "dedupe_symmetry")
     validated_device = _validate_device(device)
+    validated_eval_mode = _validate_eval_mode(eval_mode)
+    validated_eval_depth = _validate_eval_depth(eval_depth)
+    validated_prefilter_threshold = _validate_optional_threshold(
+        prefilter_threshold, "prefilter_threshold"
+    )
+
+    if validated_eval_mode == "static" and validated_eval_depth != 0:
+        raise ValueError('eval_depth must be 0 when eval_mode is "static"')
+    if validated_eval_mode == "value_search" and validated_eval_depth < 1:
+        raise ValueError('eval_depth must be >= 1 when eval_mode is "value_search"')
 
     candidates = _enumerate_opening_candidates(
         validated_plies,
@@ -1212,43 +1360,121 @@ def generate_balanced_opening_file(
             "batch_size": validated_batch_size,
             "dedupe_symmetry": validated_dedupe,
             "skipped_non_finite": 0,
+            "prefiltered": 0,
+            "searched": 0,
+            "searched_nodes": 0,
+            "eval_mode": validated_eval_mode,
+            "eval_depth": validated_eval_depth,
+            "prefilter_threshold": validated_prefilter_threshold,
         }
 
     sequences = [sequence for sequence, _ in candidates]
     boards = [board for _, board in candidates]
-    raw_values = _balanced_opening_raw_values(
-        model,
-        boards,
-        batch_size=validated_batch_size,
-        device=validated_device,
-    )
-
     entries: list[dict[str, object]] = []
     skipped_non_finite = 0
-    for sequence, board, raw_value in zip(sequences, boards, raw_values, strict=True):
-        normalized_value = _normalized_value_from_raw(raw_value)
-        filter_value = normalized_value if validated_value_scale == "normalized" else raw_value
-        if not (
-            math.isfinite(raw_value)
-            and math.isfinite(normalized_value)
-            and math.isfinite(filter_value)
-        ):
-            skipped_non_finite += 1
-            continue
-        if abs(filter_value) <= validated_threshold:
-            entries.append(
-                _opening_entry_from_board(
-                    sequence,
-                    board,
-                    raw_value=raw_value,
-                    normalized_value=normalized_value,
-                    filter_value=filter_value,
-                )
+    searched = 0
+    searched_nodes = 0
+    prefiltered = 0
+
+    evaluator = _BalancedOpeningValueEvaluator(model, boards[0], device=validated_device)
+    try:
+        if validated_prefilter_threshold is None:
+            selected_indices = list(range(len(candidates)))
+            prefilter_by_index: dict[int, tuple[float, float, float]] = {}
+            prefiltered = len(selected_indices)
+        else:
+            prefilter_raw_values = evaluator.evaluate_batch(
+                boards,
+                batch_size=validated_batch_size,
             )
+            selected_indices = []
+            prefilter_by_index = {}
+            for index, raw_value in enumerate(prefilter_raw_values):
+                normalized_value, filter_value = _filter_value_from_raw(
+                    raw_value, validated_value_scale
+                )
+                if not _finite_opening_values(raw_value, normalized_value, filter_value):
+                    skipped_non_finite += 1
+                    continue
+                if abs(filter_value) <= validated_prefilter_threshold:
+                    selected_indices.append(index)
+                    prefilter_by_index[index] = (raw_value, normalized_value, filter_value)
+            prefiltered = len(selected_indices)
+
+        if validated_eval_mode == "static":
+            if validated_prefilter_threshold is None:
+                raw_values_by_index = dict(
+                    zip(
+                        selected_indices,
+                        evaluator.evaluate_batch(
+                            [boards[index] for index in selected_indices],
+                            batch_size=validated_batch_size,
+                        ),
+                        strict=True,
+                    )
+                )
+            else:
+                raw_values_by_index = {
+                    index: prefilter_by_index[index][0] for index in selected_indices
+                }
+            for index in selected_indices:
+                raw_value = raw_values_by_index[index]
+                normalized_value, filter_value = _filter_value_from_raw(
+                    raw_value, validated_value_scale
+                )
+                if not _finite_opening_values(raw_value, normalized_value, filter_value):
+                    skipped_non_finite += 1
+                    continue
+                if abs(filter_value) <= validated_threshold:
+                    entries.append(
+                        _opening_entry_from_board(
+                            sequences[index],
+                            boards[index],
+                            raw_value=raw_value,
+                            normalized_value=normalized_value,
+                            filter_value=filter_value,
+                            eval_mode=validated_eval_mode,
+                            eval_depth=validated_eval_depth,
+                            prefilter_values=prefilter_by_index.get(index),
+                        )
+                    )
+        else:
+            for index in selected_indices:
+                searched += 1
+                raw_value, nodes = _search_opening_raw_value(
+                    boards[index],
+                    eval_depth=validated_eval_depth,
+                    evaluate_position=evaluator.evaluate_one,
+                )
+                searched_nodes += nodes
+                normalized_value, filter_value = _filter_value_from_raw(
+                    raw_value, validated_value_scale
+                )
+                if not _finite_opening_values(raw_value, normalized_value, filter_value):
+                    skipped_non_finite += 1
+                    continue
+                if abs(filter_value) <= validated_threshold:
+                    entries.append(
+                        _opening_entry_from_board(
+                            sequences[index],
+                            boards[index],
+                            raw_value=raw_value,
+                            normalized_value=normalized_value,
+                            filter_value=filter_value,
+                            eval_mode=validated_eval_mode,
+                            eval_depth=validated_eval_depth,
+                            prefilter_values=prefilter_by_index.get(index),
+                        )
+                    )
+    finally:
+        evaluator.close()
 
     _write_balanced_opening_entries_atomic(target_path, entries)
     return {
         "generated": len(candidates),
+        "prefiltered": prefiltered,
+        "searched": searched,
+        "searched_nodes": searched_nodes,
         "accepted": len(entries),
         "path": str(target_path),
         "plies": validated_plies,
@@ -1257,6 +1483,9 @@ def generate_balanced_opening_file(
         "batch_size": validated_batch_size,
         "dedupe_symmetry": validated_dedupe,
         "skipped_non_finite": skipped_non_finite,
+        "eval_mode": validated_eval_mode,
+        "eval_depth": validated_eval_depth,
+        "prefilter_threshold": validated_prefilter_threshold,
     }
 
 
@@ -1288,16 +1517,42 @@ def _load_balanced_opening_entry(
             raise ValueError(f"line {line_number}: {name} must be finite")
         if not math.isfinite(float(number)):
             raise ValueError(f"line {line_number}: {name} must be finite")
+
+    eval_mode = entry.get("eval_mode", "static")
+    eval_depth = entry.get("eval_depth", 0)
+    if type(eval_mode) is not str or eval_mode not in {"static", "value_search"}:
+        raise ValueError(f"line {line_number}: eval_mode must be 'static' or 'value_search'")
+    if type(eval_depth) is not int or not (0 <= eval_depth <= 60):
+        raise ValueError(f"line {line_number}: eval_depth must be an int in 0..60")
+
+    typed_entry = dict(cast(dict[str, object], entry))
+    for name in (
+        "prefilter_raw_value",
+        "prefilter_normalized_value",
+        "prefilter_filter_value",
+    ):
+        if name in typed_entry:
+            number = typed_entry[name]
+            if not isinstance(number, (int, float)) or isinstance(number, bool):
+                raise ValueError(f"line {line_number}: {name} must be finite")
+            if not math.isfinite(float(number)):
+                raise ValueError(f"line {line_number}: {name} must be finite")
+            typed_entry[name] = float(number)
+
     board = board_from_bits(black_bits, white_bits, side_to_move)
-    typed_entry = {
-        "sequence": sequence,
-        "black_bits": black_bits,
-        "white_bits": white_bits,
-        "side_to_move": side_to_move,
-        "raw_value": float(cast(int | float, raw_value)),
-        "normalized_value": float(cast(int | float, normalized_value)),
-        "filter_value": float(cast(int | float, filter_value)),
-    }
+    typed_entry.update(
+        {
+            "sequence": sequence,
+            "black_bits": black_bits,
+            "white_bits": white_bits,
+            "side_to_move": side_to_move,
+            "raw_value": float(cast(int | float, raw_value)),
+            "normalized_value": float(cast(int | float, normalized_value)),
+            "filter_value": float(cast(int | float, filter_value)),
+            "eval_mode": eval_mode,
+            "eval_depth": eval_depth,
+        }
+    )
     return typed_entry, board
 
 
@@ -1328,6 +1583,21 @@ def load_balanced_opening_file(
             entries.append(entry)
             boards.append(board)
     return BalancedOpeningSet(entries, boards)
+
+
+def iter_opening_boards(
+    path_or_set: object,
+    *,
+    validate: bool = True,
+) -> object:
+    """保存済み balanced opening file / set を順に読み出します。"""
+    if isinstance(path_or_set, BalancedOpeningSet):
+        opening_set = path_or_set
+    elif isinstance(path_or_set, (str, Path)):
+        opening_set = load_balanced_opening_file(path_or_set, validate=validate)
+    else:
+        raise TypeError("path_or_set must be a str, Path, or BalancedOpeningSet")
+    yield from cast(Any, opening_set)._iter_items()
 
 
 def random_balanced_opening_board(path_or_set: object, seed: int) -> Board:

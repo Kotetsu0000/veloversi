@@ -28,6 +28,7 @@ from veloversi import (
     generate_balanced_opening_file,
     generate_legal_moves,
     initial_board,
+    iter_opening_boards,
     is_legal_move,
     legal_moves_list,
     load_balanced_opening_file,
@@ -181,6 +182,21 @@ class _NonFiniteBatchFlatValueModel(_BatchFlatValueModel):
         if array.shape[0] > 0:
             values[0, 0] = np.nan
         return _FakeTensor(values)
+
+
+class _ExplodingAfterDetectValueModel(_FakeModule):
+    def __init__(self) -> None:
+        super().__init__()
+        self.flat_calls = 0
+
+    def forward(self, tensor: _FakeTensor) -> _FakeTensor:
+        array = tensor.numpy()
+        if len(array.shape) == 4:
+            raise ValueError(f"unexpected cnn shape: {array.shape}")
+        self.flat_calls += 1
+        if self.flat_calls > 1:
+            raise RuntimeError("boom")
+        return _FakeTensor(np.zeros((array.shape[0], 1), dtype=np.float32))
 
 
 class _AmbiguousModel(_FakeModule):
@@ -760,8 +776,12 @@ def test_generate_load_and_sample_balanced_opening_file(
     )
 
     assert stats["generated"] == 12
+    assert stats["prefiltered"] == 12
+    assert stats["searched"] == 0
     assert stats["accepted"] == 12
     assert stats["skipped_non_finite"] == 0
+    assert stats["eval_mode"] == "static"
+    assert stats["eval_depth"] == 0
     assert path.exists()
     assert model.batch_shapes
     assert max(shape[0] for shape in model.batch_shapes) <= 3
@@ -776,6 +796,13 @@ def test_generate_load_and_sample_balanced_opening_file(
     assert first_entry["raw_value"] == pytest.approx(0.5)
     assert first_entry["normalized_value"] == pytest.approx(float(np.tanh(0.5)))
     assert first_entry["filter_value"] == pytest.approx(float(np.tanh(0.5)))
+    assert first_entry["eval_mode"] == "static"
+    assert first_entry["eval_depth"] == 0
+
+    iterated = list(iter_opening_boards(openings))
+    assert len(iterated) == 12
+    assert cast(Board, iterated[0]["board"]).to_bits() == openings.boards[0].to_bits()
+    assert iterated[0]["sequence"] == first_entry["sequence"]
 
     first = random_balanced_opening_board(openings, seed=123)
     second = random_balanced_opening_board(openings, seed=123)
@@ -801,6 +828,8 @@ def test_generate_balanced_opening_file_supports_raw_scale_and_non_finite_skip(
     )
 
     assert stats["generated"] == 1
+    assert stats["prefiltered"] == 1
+    assert stats["searched"] == 0
     assert stats["accepted"] == 0
     assert stats["skipped_non_finite"] == 1
     openings = load_balanced_opening_file(path)
@@ -815,8 +844,10 @@ def test_generate_balanced_opening_file_rejects_policy_model_and_invalid_options
     monkeypatch.setattr(veloversi, "_import_torch", _fake_torch_module)
     model = _BatchFlatValueModel()
 
+    policy_model = _BatchPolicyModel()
     with pytest.raises(ValueError, match="policy"):
-        generate_balanced_opening_file(_BatchPolicyModel(), tmp_path / "policy.jsonl", plies=1)
+        generate_balanced_opening_file(policy_model, tmp_path / "policy.jsonl", plies=1)
+    assert policy_model.training is True
     with pytest.raises(ValueError, match="batch_size"):
         generate_balanced_opening_file(model, tmp_path / "bad-batch.jsonl", batch_size=0)
     with pytest.raises(ValueError, match="plies"):
@@ -825,6 +856,20 @@ def test_generate_balanced_opening_file_rejects_policy_model_and_invalid_options
         generate_balanced_opening_file(model, tmp_path / "bad-threshold.jsonl", threshold=-0.1)
     with pytest.raises(ValueError, match="value_scale"):
         generate_balanced_opening_file(model, tmp_path / "bad-scale.jsonl", value_scale="bad")
+    with pytest.raises(ValueError, match="eval_mode"):
+        generate_balanced_opening_file(model, tmp_path / "bad-mode.jsonl", eval_mode="bad")
+    with pytest.raises(ValueError, match="eval_depth"):
+        generate_balanced_opening_file(model, tmp_path / "bad-depth.jsonl", eval_depth=61)
+    with pytest.raises(ValueError, match="eval_depth"):
+        generate_balanced_opening_file(model, tmp_path / "bad-static.jsonl", eval_depth=1)
+    with pytest.raises(ValueError, match="eval_depth"):
+        generate_balanced_opening_file(
+            model, tmp_path / "bad-search.jsonl", eval_mode="value_search"
+        )
+    with pytest.raises(ValueError, match="prefilter_threshold"):
+        generate_balanced_opening_file(
+            model, tmp_path / "bad-prefilter.jsonl", prefilter_threshold=-0.1
+        )
     with pytest.raises(ValueError, match="seed"):
         random_balanced_opening_board(BalancedOpeningSet([], []), seed=-1)
 
@@ -848,6 +893,81 @@ def test_load_balanced_opening_file_validation_rejects_mismatched_sequence(
         load_balanced_opening_file(path, validate=True)
     openings = load_balanced_opening_file(path, validate=False)
     assert len(openings) == 1
+    assert openings.entries[0]["eval_mode"] == "static"
+    assert openings.entries[0]["eval_depth"] == 0
+
+
+def test_iter_opening_boards_loads_path_and_preserves_unknown_fields(tmp_path: Path) -> None:
+    board = initial_board().apply_move(19)
+    black_bits, white_bits, side_to_move = board.to_bits()
+    path = tmp_path / "balanced-extra.jsonl"
+    path.write_text(
+        (
+            '{"sequence":"d3","black_bits":'
+            f'{black_bits},"white_bits":{white_bits},"side_to_move":"{side_to_move}",'
+            '"raw_value":0.0,"normalized_value":0.0,"filter_value":0.0,'
+            '"extra_field":"kept"}\n'
+        ),
+        encoding="utf-8",
+    )
+
+    items = list(iter_opening_boards(path, validate=True))
+
+    assert len(items) == 1
+    assert cast(Board, items[0]["board"]).to_bits() == board.to_bits()
+    assert items[0]["extra_field"] == "kept"
+    assert items[0]["eval_mode"] == "static"
+    assert items[0]["eval_depth"] == 0
+    assert list(iter_opening_boards(BalancedOpeningSet([], []))) == []
+
+
+def test_generate_balanced_opening_file_value_search_and_prefilter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(veloversi, "_import_torch", _fake_torch_module)
+    model = _BatchFlatValueModel(value=0.0)
+    path = tmp_path / "balanced-search.jsonl"
+
+    stats = generate_balanced_opening_file(
+        model,
+        path,
+        plies=1,
+        threshold=1.0,
+        value_scale="normalized",
+        batch_size=2,
+        dedupe_symmetry=False,
+        eval_mode="value_search",
+        eval_depth=1,
+        prefilter_threshold=1.0,
+    )
+
+    assert stats["generated"] == 4
+    assert stats["prefiltered"] == 4
+    assert stats["searched"] == 4
+    assert cast(int, stats["searched_nodes"]) > 0
+    assert stats["accepted"] == 4
+    openings = load_balanced_opening_file(path)
+    first = openings.entries[0]
+    assert first["eval_mode"] == "value_search"
+    assert first["eval_depth"] == 1
+    assert first["prefilter_raw_value"] == pytest.approx(0.0)
+    assert first["raw_value"] == pytest.approx(0.0)
+    assert model.training is True
+
+
+def test_generate_balanced_opening_file_preserves_existing_file_on_model_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(veloversi, "_import_torch", _fake_torch_module)
+    model = _ExplodingAfterDetectValueModel()
+    path = tmp_path / "existing.jsonl"
+    path.write_text("old\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        generate_balanced_opening_file(model, path, plies=1)
+
+    assert path.read_text(encoding="utf-8") == "old\n"
+    assert model.training is True
 
 
 def test_start_game_recording_and_record_move_update_current_board() -> None:
